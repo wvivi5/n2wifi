@@ -1,0 +1,7 @@
+# The tool itself has no extension and is executed through its shebang --
+# a CRLF here would break "#!/usr/bin/env python3".
+n2wifi        text eol=lf
+*.sh          text eol=lf
+*.ps1         text eol=lf
+*.md          text eol=lf
+LICENSE       text eol=lf
