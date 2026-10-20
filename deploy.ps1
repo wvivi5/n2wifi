@@ -33,9 +33,22 @@ $sshOpt = @('-o', 'StrictHostKeyChecking=accept-new', '-o', 'UserKnownHostsFile=
             '-o', 'LogLevel=ERROR', '-o', 'ConnectTimeout=10')
 $scpOpt = @('-o', 'StrictHostKeyChecking=accept-new', '-o', 'UserKnownHostsFile=NUL',
             '-o', 'LogLevel=ERROR', '-o', 'ConnectTimeout=10')
+
+# Keys: use the one given, else the usual suspects in ~/.ssh.  Nothing found means
+# password auth -- and a hidden password prompt in a script just hangs, so fail fast.
+if (-not $Key) {
+    foreach ($c in @("$env:USERPROFILE\.ssh\id_ed25519", "$env:USERPROFILE\.ssh\id_rsa",
+                     "$env:USERPROFILE\.ssh\id_ecdsa", "$env:USERPROFILE\.ssh\note2_key")) {
+        if (Test-Path $c) { $Key = $c; break }
+    }
+}
 if ($Key) {
     $sshOpt += @('-i', $Key)
     $scpOpt += @('-i', $Key)
+} else {
+    Write-Host "! no ssh key found in ~/.ssh -- if the phone wants a password, pass -Key <path>"
+    $sshOpt += @('-o', 'BatchMode=yes')
+    $scpOpt += @('-o', 'BatchMode=yes')
 }
 
 # ---- build the target list -------------------------------------------------
