@@ -157,20 +157,26 @@ Exit codes: `0` ok, `1` error, `2` not connected (`ip`).
    land in the same second, so a backup is never clobbered).
 5. **`apply` = restart `system_server`.** The framework only reads the store at startup, so
    `n2wifi` kills `system_server`; zygote exits, init starts a fresh one, and the new
-   `system_server` re-reads the store. `netd` and `wpa_supplicant` are not restarted, so the
-   link (and your ssh session) normally survives.
+   `system_server` re-reads the store. `netd` and `wpa_supplicant` are not restarted, but the
+   framework restart does blip `wlan0` — an ssh session over Wi-Fi usually drops for ~30–60 s
+   and then reconnects.
 
 ## What `apply` / `join` really does to your phone
 
-- **AOSP-like ROMs:** the framework restarts in ~20–40 s, the Wi-Fi link blips, ssh usually
-  stays up. This is the happy path.
-- **Some vendor ROMs (e.g. MIUI 9 on the test device):** the death of `system_server` is treated
-  as a system crash and the **phone reboots**. Your ssh session drops. The phone comes back in
-  1–2 minutes with the new config active, which is still the right end state — just be ready
-  for it, and do not run `join` on a phone you cannot power-cycle.
+Measured on the test device (Mi Note 2, MIUI 9, Android 8.0):
 
-If you would rather avoid the surprise, use `n2wifi add` (write only) and let the config take
-effect at the next reboot you were going to do anyway.
+- `system_server` is restarted and the new one is up in **~20–30 s**.
+- The phone **does not reboot** — uptime keeps counting across `apply`.
+- The Wi-Fi link blips while the framework comes back, so **your ssh session drops**
+  and works again about 30–60 s later. The config is already on disk at that point;
+  just reconnect.
+- If you are connected through `adb forward` over USB: the USB gadget is owned by
+  `system_server`, so adb disappears with it. Re-plug the cable or run
+  `adb reconnect` (the phone keeps running).
+- Some vendor ROMs do treat the death of `system_server` as a crash and reboot
+  instead. It was not observed here, but it is out of this tool's control — if you
+  cannot power-cycle the phone, use `n2wifi add` (write only) and let the config take
+  effect at the next reboot you were going to do anyway.
 
 ## Troubleshooting
 
@@ -181,7 +187,8 @@ effect at the next reboot you were going to do anyway.
 | `error: iw not found` | no `iw` anywhere | `apt-get install -y iw` in the chroot, or use Android's `/system/bin/iw` |
 | `scan failed: ... wlan0` | Wi-Fi is off / `wlan0` is down | `svc wifi enable`, wait ~10 s, scan again |
 | `no AP found` | Wi-Fi off, or `wlan0` has no scan results yet | `svc wifi enable`, then `n2wifi scan` |
-| ssh dies during `join` / `apply` | framework restart (or full reboot on some ROMs) | wait 1–2 min and reconnect; the config was already written |
+| ssh dies during `join` / `apply` | the framework restart blips `wlan0` | wait ~1 min and reconnect; the config was already written, the phone never rebooted |
+| adb disappears during `join` / `apply` (USB) | `system_server` owns the USB gadget and was restarted | re-plug the cable or `adb reconnect`; the phone keeps running |
 | Phone unreachable after `join` | wrong SSID / password, or the AP is out of range | plug USB (`adb forward tcp:8022 tcp:8022`), or use a USB Ethernet adapter |
 | Old network still connected after `add` | `add` only writes the file | `n2wifi apply` |
 | Network disappears after a reboot | store format mismatch on that Android version | `n2wifi revert`, then send the `<Network>` block of your `WifiConfigStore.xml` in an issue |

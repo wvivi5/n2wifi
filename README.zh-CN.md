@@ -147,16 +147,22 @@ n2wifi join "SiteB-5G" "password"
    同一秒内第二次写入会加 `-2`、`-3` 后缀，**备份永远不会互相覆盖**。
 5. **`apply` = 重启 `system_server`。** 框架只在启动时读这个存储，所以 `n2wifi` 杀掉
    `system_server`；zygote 跟着退出，init 再拉起一个新的，新框架重新读配置。
-   `netd` 和 `wpa_supplicant` 不重启，所以链路（和你的 ssh）通常不会断。
+   `netd` 和 `wpa_supplicant` 不重启，但框架重启时 `wlan0` 会抖一下 —— 走 WiFi 的 ssh
+   通常会断 30~60 秒，然后自己连回来。
 
 ## `apply` / `join` 到底会把手机怎么样
 
-- **接近 AOSP 的 ROM：** 框架 20~40 秒重启完，WiFi 抖一下，ssh 一般不断。这是理想情况。
-- **部分厂商 ROM（例如实测机上的 MIUI 9）：** 把 `system_server` 的死亡当成系统崩溃，
-  **整机重启**，你的 ssh 会断。1~2 分钟后手机带着新配置回来 —— 结果是对的，但要有心理准备，
-  不要在没法断电重启的机器上随手 `join`。
+在实测机（小米 Note 2，MIUI 9 / Android 8.0）上的实测结果：
 
-不想冒这个险就用 `n2wifi add`（只写文件），等你下次本来就要重启的时候自然生效。
+- `system_server` 被重启，新的在 **约 20~30 秒**内起来。
+- 手机**不会重启** —— 连续两次 `apply` 前后 `uptime` 一直连续。
+- 框架回来时 WiFi 会抖一下，所以**你的 ssh 会断**，大约 30~60 秒后能重连。
+  这时候配置早就写进磁盘了，重连就行。
+- 如果是走 USB 的 `adb forward`：USB gadget 归 `system_server` 管，它会跟着消失。
+  重新插拔线或 `adb reconnect`（手机一直在跑）。
+- 个别厂商 ROM 确实会把 `system_server` 的死亡当成崩溃而整机重启。实测机没有出现，
+  但这不归本工具控制 —— 如果你没法给手机断电重启，就用 `n2wifi add`（只写文件），
+  等你下次本来就要重启的时候自然生效。
 
 ## 故障排查
 
@@ -167,7 +173,8 @@ n2wifi join "SiteB-5G" "password"
 | `error: iw not found` | 哪都没有 `iw` | chroot 里 `apt-get install -y iw`，或用 Android 的 `/system/bin/iw` |
 | `scan failed: ... wlan0` | WiFi 关着 / `wlan0` 没起来 | `svc wifi enable`，等 ~10 秒再扫 |
 | `no AP found` | WiFi 关着，或还没有扫描结果 | `svc wifi enable` 后重新 `n2wifi scan` |
-| `join` / `apply` 时 ssh 断了 | 框架重启（部分 ROM 是整机重启） | 等 1~2 分钟重连，配置已经写进去了 |
+| `join` / `apply` 时 ssh 断了 | 框架重启时 `wlan0` 抖了一下 | 等 ~1 分钟重连，配置已经写进去了，手机没重启 |
+| USB 下 `join` / `apply` 后 adb 不见了 | USB gadget 归 `system_server` 管，它被重启了 | 重新插拔线或 `adb reconnect`，手机一直在跑 |
 | `join` 之后彻底联系不上 | SSID / 密码写错，或 AP 不在范围内 | 插 USB `adb forward tcp:8022 tcp:8022`，或用 USB 有线网卡 |
 | `add` 之后还是连老的网络 | `add` 只写文件 | `n2wifi apply` |
 | 重启后网络又没了 | 该 Android 版本的存储格式不同 | `n2wifi revert`，然后把 `WifiConfigStore.xml` 里的 `<Network>` 块发到 issue |
