@@ -1,7 +1,8 @@
 # n2wifi
 
-**Manage a headless Android phone's Wi-Fi from a terminal — scan, add, switch and roll back
-networks without ever touching the screen.**
+**Manage Wi-Fi from a terminal — scan, add, switch and roll back networks
+without ever touching the screen.** Works on **Android**, on **NetworkManager**
+distros and on plain **wpa_supplicant** systems, from one single file.
 
 [中文说明](README.zh-CN.md)
 
@@ -11,6 +12,16 @@ $ n2wifi scan
   signal    band  chan  security    SSID
   -55 dBm   5G    36    WPA/WPA2    SiteA-5G   [connected,associated]
   -58 dBm   2.4G  6     WPA/WPA2    SiteA      [saved]
+```
+
+The same command against a NetworkManager host (no `iw` installed):
+
+```
+$ n2wifi scan
+31 APs, 28 distinct SSIDs:
+  signal    band  chan  security    SSID
+  100%      2.4G  6     WPA1 WPA2   HomeNet
+  87%       5G    36    WPA1 WPA2   HomeNet_5G   [connected]
 ```
 
 ---
@@ -28,42 +39,77 @@ The usual tool for this is `wpa_cli`, but on several vendor ROMs (MIUI in partic
 (`WifiConfigStore.xml`) and then asks the framework to reload it. No screen, no
 `wpa_supplicant` control socket, no Xposed, no extra APK.
 
+On a normal Linux box the same commands drive whatever is actually in charge —
+`nmcli` when NetworkManager owns the radio, `wpa_cli`/`wpa_supplicant.conf` when it does not.
+You get one set of commands (`scan` / `list` / `add` / `join` / `del` / `revert`) instead of
+remembering three different toolchains.
+
+## Backends
+
+| id | platform | config store | `apply` cost |
+|---|---|---|---|
+| `android` | Android 7+ | `/data/misc/wifi/WifiConfigStore.xml`, or `/data/misc/apexdata/com.android.wifi/…` on 11+ | restarts `system_server`, link blips 30–60 s |
+| `nm` | NetworkManager (Debian/Ubuntu/Fedora/Arch desktop & server, postmarketOS) | `nmcli connection` profiles under `/etc/NetworkManager/system-connections/` | re-activates the profile, 1–3 s |
+| `wpa` | wpa_supplicant (Raspbian Lite, pmOS, embedded, Android ≤6) | `wpa_supplicant.conf`, or the live control socket | `wpa_cli reconfigure`, usually <1 s |
+
+Detection runs in that order and stops at the first match; `n2wifi backend` prints
+what was picked and why. Override with `N2WIFI_BACKEND=android|nm|wpa`.
+
 ## Features
 
 - `scan` — nearby APs with signal, band, channel and security, `[connected]` / `[saved]` tags
 - `list` / `status` / `ip` — what is saved, what is connected, and a script-friendly IP
 - `add` / `join` / `del` — add a network, add and switch to it now, or remove one
-- **Safe writes** — atomic replace, XML self-check before commit, automatic timestamped
-  backup for every single write, and `revert`
-- **Format-proof** — new entries are cloned from a block the system wrote itself, so field
-  changes between Android versions do not silently drop your network
-- **Never touches `wpa_supplicant`** — the link keeps running while the config is rewritten
+- `backend` — which backend was detected, which config file it uses, which interface
+- **Safe writes** — atomic replace, self-check before commit, automatic timestamped
+  backup for every write, and `revert`
+- **Format-proof (Android)** — new entries are cloned from a block the system wrote itself,
+  so field changes between Android versions do not silently drop your network
+- **Never touches `wpa_supplicant` on Android** — the link keeps running while the config is rewritten
+- **No hidden dependencies** — `iw` is used when present, `nmcli` takes over when it is not
 - Single file, standard library only, bilingual CLI (`--lang en|zh`)
 
 ## Supported systems
 
 | | |
 |---|---|
-| **Tested on** | Xiaomi Mi Note 2 (`scorpio`), Android 8.0 / MIUI 9, config store `/data/misc/wifi/WifiConfigStore.xml` |
-| **Expected to work** | Android 7.0 – 10 (same store format and location) |
-| **Android 11+** | Auto-detects `/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml`. The store format is still the same `WifiConfigStoreData` XML, so it should work — **not tested yet** |
-| **Not supported** | Android ≤ 6 (those use `wpa_supplicant.conf`, not this store), non-root shells, ROMs that keep Wi-Fi config somewhere else |
+| **Tested on (Android)** | Xiaomi Mi Note 2 (`scorpio`), Android 8.0 / MIUI 9, store `/data/misc/wifi/WifiConfigStore.xml` |
+| **Tested on (NM)** | postmarketOS on Redmi Note 4X (musl, NM 1.4x): `backend`, `list`, `status`, `ip`, `scan` (nmcli fallback), `add`, `del`, `backups`, `revert` |
+| **Tested on (wpa)** | Debian host with a synthetic `wpa_supplicant.conf`: `list`, `add`, `del`, `backups`, `revert` |
+| **Expected to work** | Android 7.0–10 (same store format); any distro with NetworkManager ≥1.10 or wpa_supplicant ≥2.6 |
+| **Android 11+** | Auto-detects `/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml`. Same `WifiConfigStoreData` XML, so it should work — **not tested yet** |
+| **Not supported** | Android ≤ 6 (use `N2WIFI_BACKEND=wpa`), non-root shells, ROMs that keep Wi-Fi config somewhere else |
 
 Requirements:
 
-- **root** (uid 0) — `n2wifi` must be able to read/write `/data/misc/wifi` and to kill `system_server`
-- **Python 3.7+** in the shell you run it from (a Linux chroot, Termux, or any root shell)
-- **`iw`** — the chroot's `iw`, or Android's `/system/bin/iw` (auto-detected)
-- `/proc` mounted (always true on Android)
+- **root** (uid 0) — writes to system config, and on Android also `kill system_server`
+- **Python 3.6+** (standard library only)
+- One of: `nmcli` + running NetworkManager, `wpa_cli`/`wpa_supplicant.conf`, or `iw`
+  (`iw` is optional on the `nm` backend — scanning falls back to `nmcli`)
+- `/proc` mounted
 
-No Wi-Fi hardware? `scan` and `status` need `wlan0`; `add` / `del` work without it.
+No Wi-Fi hardware? `scan` and `status` need a wireless interface; `add` / `del` work without it.
+Set `N2WIFI_IFACE=wlp3s0` if auto-detection picks the wrong one.
 
 ## Install
 
 `n2wifi` is one file. Copy it to `/usr/local/bin/n2wifi` (or anywhere in `PATH`) and make it
 executable.
 
-### A. Over ssh (the phone already has Wi-Fi)
+### A. On this machine (Linux / postmarketOS / any box you are logged into)
+
+```sh
+sudo ./install.sh                 # installs to /usr/local/bin/n2wifi and prints the backend
+```
+
+or by hand:
+
+```sh
+sudo install -m 755 n2wifi /usr/local/bin/n2wifi
+n2wifi backend                    # what did it detect?
+```
+
+### B. Over ssh (the phone already has Wi-Fi)
 
 ```sh
 ./install.sh root@192.168.1.50 8022
@@ -76,7 +122,7 @@ scp -P 8022 n2wifi root@192.168.1.50:/usr/local/bin/n2wifi
 ssh -p 8022 root@192.168.1.50 'chmod 755 /usr/local/bin/n2wifi && n2wifi --version'
 ```
 
-### B. No Wi-Fi yet — USB bootstrap (the chicken-and-egg case)
+### C. No Wi-Fi yet — USB bootstrap (the chicken-and-egg case)
 
 Plug USB, forward the phone's ssh port over adb, then push it:
 
@@ -92,11 +138,12 @@ On Windows:
 .\deploy.ps1 -Serial 4bbc97a9
 ```
 
-### C. Windows, over the LAN (one phone or a whole range)
+### D. Windows, over the LAN (one host or a whole range)
 
 ```powershell
 .\deploy.ps1 -IPs 192.168.1.50
 .\deploy.ps1 -Range 192.168.1.50-59
+.\deploy.ps1 -IPs 192.168.1.162 -Port 22      # a normal Linux host
 ```
 
 `deploy.ps1` uses `scp` + `ssh` (OpenSSH client, built into Windows 10+). Exit code is the
@@ -105,9 +152,10 @@ number of failures.
 ## Quick start
 
 ```sh
+n2wifi backend                   # which backend / config file / interface
 n2wifi scan                      # what is around?
 n2wifi add "SiteB-5G" "password" # save it (does not disturb the current link)
-n2wifi apply                     # make Android use it
+n2wifi apply                     # make the backend use it
 ```
 
 Switching right now, in one step:
@@ -116,13 +164,14 @@ Switching right now, in one step:
 n2wifi join "SiteB-5G" "password"
 ```
 
-After a reboot the phone reconnects on its own — the config is the platform's own store,
+After a reboot the machine reconnects on its own — the config is the platform's own store,
 nothing is injected at boot.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
+| `n2wifi backend` | Which backend was detected, which config file it uses, which interface, and why |
 | `n2wifi list` | List saved networks, marking the connected one |
 | `n2wifi status` | Current SSID, signal, band, IP, and the saved list |
 | `n2wifi ip` | Print just the IPv4 address (exit 2 if not connected) — handy in scripts |
@@ -132,14 +181,44 @@ nothing is injected at boot.
 | `n2wifi add <SSID> --open` | Add an open network |
 | `n2wifi join <SSID> <pass>` | `add` + `apply` |
 | `n2wifi del <SSID>` | Remove a saved network (needs `apply` to take effect) |
-| `n2wifi apply` | Make the framework reload the store — restarts `system_server` |
+| `n2wifi apply` | Make the backend reload its config (see the backend table for the cost) |
 | `n2wifi backups` | List the automatic backups |
 | `n2wifi revert [file]` | Restore a backup (default: newest), then `apply` |
 | `--lang en\|zh` | Output language (default: from `LANG`, otherwise English) |
 
 Exit codes: `0` ok, `1` error, `2` not connected (`ip`).
 
+### Same command, different backend
+
+| | `android` | `nm` | `wpa` |
+|---|---|---|---|
+| `add` writes to | cloned `<Network>` block in the XML | a new profile with `autoconnect no` | `network={…}` appended to the conf, or `wpa_cli add_network` + `save_config` |
+| `del` | removes the block | `nmcli connection delete` | removes the block / `remove_network` |
+| `apply` | restart `system_server` (30–60 s) | `connection up`, 1–3 s | `wpa_cli reconfigure`, <1 s |
+| `scan` source | `iw` (or `/system/bin/iw` via chroot) | `iw` if present, otherwise `nmcli device wifi list` | same as `nm` |
+| backup target | `WifiConfigStore.xml.n2bak-*` | `*.nmconnection.n2bak-*` | `wpa_supplicant.conf.n2bak-*` |
+
+`add` never switches the link on any backend: NetworkManager profiles are created with
+`autoconnect no`, and the Android/wpa paths only touch the file. `join`/`apply` is what
+actually activates.
+
 ## How it works
+
+### Shared by every backend
+
+- **Scan** uses `iw dev <iface> scan` when `iw` exists. If it does not (a stock
+  postmarketOS has NetworkManager but no `iw`), `n2wifi` falls back to
+  `nmcli -t -f BSSID,SSID,SIGNAL,FREQ,SECURITY device wifi list`, which reports signal as a
+  percentage instead of dBm — the table shows `%` in that case. `iw` is also given up on if
+  it is installed but the kernel refuses the scan.
+- **Interface** is the first entry under `/sys/class/net/*/wireless`, else what
+  `nmcli device status` calls a `wifi` device, else `wlan0`. Override with `N2WIFI_IFACE`.
+- **Backups** are copies placed next to the original as `<file>.n2bak-<YYYYmmdd-HHMMSS>`;
+  a `-2`, `-3`… suffix is added when two writes land in the same second. The newest 20 are
+  kept and older ones are pruned, so a script in a loop cannot fill the disk.
+- **`add` never activates anything** — see the per-backend table above.
+
+### `android` backend
 
 1. **Find the store.** `/data/misc/wifi/WifiConfigStore.xml` (Android 7–10) or
    `/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml` (Android 11+). Override with
@@ -153,13 +232,37 @@ Exit codes: `0` ok, `1` error, `2` not connected (`ip`).
    and checked for `WifiConfigStoreData` + `NetworkList`, then `rename()`d over the original
    with owner `1000:1000` and mode `0600`. If the self-check fails, the original is untouched.
 4. **Back up first.** Every write first copies the store to
-   `WifiConfigStore.xml.n2bak-<YYYYmmdd-HHMMSS>` (a `-2`, `-3`… suffix is added when two writes
-   land in the same second, so a backup is never clobbered).
+   `WifiConfigStore.xml.n2bak-<YYYYmmdd-HHMMSS>`.
 5. **`apply` = restart `system_server`.** The framework only reads the store at startup, so
    `n2wifi` kills `system_server`; zygote exits, init starts a fresh one, and the new
    `system_server` re-reads the store. `netd` and `wpa_supplicant` are not restarted, but the
    framework restart does blip `wlan0` — an ssh session over Wi-Fi usually drops for ~30–60 s
    and then reconnects.
+
+### `nm` backend
+
+`add` runs `nmcli connection add type wifi con-name <SSID> ssid <SSID>
+connection.autoconnect no` plus either `wifi-sec.key-mgmt wpa-psk wifi-sec.psk <pass>` or
+`wifi-sec.key-mgmt none` for `--open`. The profile name is deliberately the SSID so that
+`list` and `del` stay predictable. `del` snapshots the keyfile first, then
+`nmcli connection delete`. `apply` flips `connection.autoconnect yes` and runs
+`connection up`.
+
+One gotcha this code handles: `nmcli -t` prints the raw settings name, so a Wi-Fi profile
+appears as `802-11-wireless` rather than `wifi` — both spellings are accepted, otherwise
+`list` looks empty on postmarketOS.
+
+### `wpa` backend
+
+If the control socket answers (`wpa_cli -i <iface> ping` → `PONG`), everything goes through
+`wpa_cli`: `add_network`, `set_network … ssid/psk/key_mgmt`, `enable_network`, then
+`save_config`. If `save_config` is refused (the socket is often read-only in containers),
+it falls through to editing `wpa_supplicant.conf` directly. If there is no socket at all —
+the normal case on a system where NetworkManager owns the radio — only the file is edited and
+`apply` restarts the service.
+
+The passphrase is written in plaintext inside quotes. That is valid for wpa_supplicant ≥2.0
+and avoids a dependency on `wpa_passphrase`; the file is still `0600`.
 
 ## What `apply` / `join` really does to your phone
 

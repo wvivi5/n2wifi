@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""n2wifi -- manage Android Wi-Fi from a shell, without touching the screen.
+"""n2wifi -- manage Wi-Fi from a shell, without touching the screen.
 
-Run `n2wifi --help` for usage.
+Works on Android (WifiConfigStore.xml), NetworkManager (nmcli) and plain
+wpa_supplicant.  Run `n2wifi --help` for usage.
 Docs: README.md (English) / README.zh-CN.md (Chinese).
 """
 
@@ -15,7 +16,7 @@ import sys
 import time
 import unicodedata
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 # --------------------------------------------------------------------------
 # i18n
@@ -24,19 +25,25 @@ VERSION = "1.0.0"
 M = {}
 
 M["en"] = {
-    "usage": """n2wifi {version} -- manage Android Wi-Fi from a shell (no screen needed)
+    "usage": """n2wifi {version} -- manage Wi-Fi from a shell (no screen needed)
+
+Backends (auto-detected, override with N2WIFI_BACKEND):
+  android          Android 7+   WifiConfigStore.xml + framework reload
+  nm               NetworkManager  (nmcli, most desktop/server distros)
+  wpa              wpa_supplicant   (Debian/Raspbian/pmOS/embedded)
 
 Usage:
+  n2wifi backend                 which backend was detected, and why
   n2wifi list                    list saved networks
   n2wifi status                  current SSID / signal / band / IP
   n2wifi ip                      print the current IPv4 address (for scripts)
   n2wifi scan                    scan nearby APs (signal/band/channel/security)
   n2wifi scan --all              same, but list every BSSID (no merging)
-  n2wifi join  <SSID> <pass>     add + reload the framework now (recommended)
+  n2wifi join  <SSID> <pass>     add + activate now (recommended)
   n2wifi add   <SSID> <pass>     add only (takes effect on next reload/reboot)
   n2wifi add   <SSID> --open     add an open network
   n2wifi del   <SSID>            remove a saved network
-  n2wifi apply                   make Android reload the config (~40 s)
+  n2wifi apply                   make the backend pick up the new config
   n2wifi backups                 list automatic backups
   n2wifi revert [file]           restore a backup (default: the newest)
 
@@ -45,23 +52,27 @@ Options:
   -h, --help                     this help
   -V, --version                  print version
 
+Environment:
+  N2WIFI_BACKEND   android | nm | wpa     force a backend
+  N2WIFI_IFACE     e.g. wlan0 or wlp3s0   force the wireless interface
+  N2WIFI_XML       path to WifiConfigStore.xml       (android)
+  N2WIFI_CONF      path to wpa_supplicant.conf       (wpa)
+
 Notes:
   * must run as root (uid 0)
-  * config store: /data/misc/wifi/WifiConfigStore.xml          (Android 7-10)
-                  /data/misc/apexdata/com.android.wifi/...      (Android 11+)
-    both are checked automatically; set N2WIFI_XML to override
-  * every write is backed up first to WifiConfigStore.xml.n2bak-<timestamp>
-  * `apply` restarts system_server; the Wi-Fi link blips for ~30-60 s and an ssh
-    session drops with it (over USB, adb disappears too -- re-plug). The phone
-    itself does not reboot on the test device; a few ROMs may reboot instead
+  * every write is backed up first (<config>.n2bak-<timestamp>)
+  * `apply` cost per backend:
+      android  restarts system_server, the link blips 30-60 s
+      wpa      wpa_cli reconfigure, usually sub-second
+      nm       re-activates the connection, 1-3 s
   * docs: README.md / README.zh-CN.md""",
 
     "not_root": "must run as root (uid 0)",
     "store_missing": "cannot find the Wi-Fi config store.\n"
                      "  looked for: {paths}\n"
                      "  is this an Android device? set N2WIFI_XML=/path/to/WifiConfigStore.xml",
-    "no_iw": "iw not found. Install it (apt-get install -y iw) or keep /system/bin/iw available",
-    "scan_timeout": "scan timed out (is wlan0 up?)",
+    "no_iw": "iw not found. Install it (apt-get install -y iw) or set N2WIFI_IFACE",
+    "scan_timeout": "scan timed out (is the interface up?)",
     "scan_fail": "scan failed: {err}",
     "scan_none": "no AP found (is Wi-Fi enabled?)",
     "scan_head": "{aps} APs, {ssids} distinct SSIDs:",
@@ -86,13 +97,6 @@ Notes:
     "status_ip": "IP        : {v}",
     "status_saved": "Saved     : {n} -> {list}",
     "not_connected": "(not connected)",
-    "apply_no_ss": "system_server not found -- is the Android framework running?",
-    "apply_start": "reloading Android Wi-Fi config (restarting system_server, pid={pid}) ...",
-    "apply_hint1": "  note: the framework restart blips wlan0 -- an ssh session over Wi-Fi usually",
-    "apply_hint2": "        drops for 30-60 s and reconnects; over USB, adb disappears too (re-plug).",
-    "apply_kill_fail": "cannot kill system_server: {e}",
-    "apply_back": "[ok] system_server is back (pid={pid}, {sec}s)",
-    "apply_late": "[!] no new system_server within 180 s (the phone may have rebooted; it will come back)",
     "selfcheck_fail": "self-check failed ({e}); nothing was written",
     "ssid_empty": "SSID must not be empty",
     "need_psk": "password required (or use --open)",
@@ -101,7 +105,7 @@ Notes:
     "write_verify_fail": "verification after write failed; run `n2wifi revert` (backup: {b})",
     "added": "[ok] added: {ssid}  ({old} -> {new} networks)",
     "backup_line": "     backup: {b}",
-    "add_only_note": "     note: written to disk only; run `n2wifi apply` to make Android use it",
+    "add_only_note": "     note: written to disk only; run `n2wifi apply` to activate it",
     "no_such_ssid": "no such SSID: {ssid}",
     "del_verify_fail": "verification after delete failed; run `n2wifi revert` (backup: {b})",
     "deleted": "[ok] deleted: {ssid}  ({n} left)",
@@ -109,28 +113,66 @@ Notes:
     "no_such_backup": "backup not found: {p}",
     "bad_backup": "that backup looks incomplete; refusing to restore",
     "reverted": "[ok] restored from {p}",
-    "apply_note": "     make Android use it: n2wifi apply",
+    "apply_note": "     activate now: n2wifi apply",
     "usage_add": "usage: n2wifi add <SSID> <password>   or   n2wifi add <SSID> --open",
     "usage_join": "usage: n2wifi join <SSID> <password>   or   n2wifi join <SSID> --open",
     "usage_del": "usage: n2wifi del <SSID>",
     "unknown_cmd": "unknown command: {cmd}\n\n{usage}",
     "wep_unsupported": "WEP is not supported",
+
+    # --- backend layer ---
+    "be_none": "no supported Wi-Fi backend found.\n"
+               "  tried: Android WifiConfigStore.xml, nmcli (NetworkManager), "
+               "wpa_supplicant.conf\n"
+               "  force one with N2WIFI_BACKEND=android|nm|wpa",
+    "be_header": "backend  : {name}  ({desc})",
+    "be_store": "config   : {path}",
+    "be_iface": "interface: {iface}",
+    "be_nm_off": "nmcli exists but NetworkManager is not running",
+    "desc_android": "Android WifiConfigStore.xml",
+    "desc_wpa": "wpa_supplicant",
+    "desc_nm": "NetworkManager",
+    "wpa_no_conf": "no wpa_supplicant.conf found (set N2WIFI_CONF=/path/to/wpa_supplicant.conf)\n"
+                   "  looked for: {paths}",
+    "wpa_no_cli": "wpa_cli not found -- install wpasupplicant, or the config file will only "
+                  "be written (no live reload)",
+    "nm_add_fail": "nmcli could not add the connection: {err}",
+    "nm_del_fail": "nmcli could not delete the connection: {err}",
+    "nm_apply_fail": "nmcli could not activate the connection: {err}",
+    "wpa_add_fail": "wpa_cli could not add the network: {err}",
+    "apply_android": "reloading Android Wi-Fi config (restarting system_server, pid={pid}) ...",
+    "apply_android_hint1": "  note: the framework restart blips wlan0 -- an ssh session over Wi-Fi usually",
+    "apply_android_hint2": "        drops for 30-60 s and reconnects; over USB, adb disappears too (re-plug).",
+    "apply_no_ss": "system_server not found -- is the Android framework running?",
+    "apply_kill_fail": "cannot kill system_server: {e}",
+    "apply_back": "[ok] system_server is back (pid={pid}, {sec}s)",
+    "apply_late": "[!] no new system_server within 180 s (the phone may have rebooted; it will come back)",
+    "apply_wpa": "reloading wpa_supplicant (wpa_cli reconfigure) ...",
+    "apply_wpa_restart": "wpa_cli not reachable, restarting the service instead ...",
+    "apply_nm": "activating {ssid} via NetworkManager ...",
+    "apply_nm_generic": "NetworkManager: re-applying the profile ...",
 }
 
 M["zh"] = {
-    "usage": """n2wifi {version} —— 不开屏，从命令行管理 Android 的 WiFi
+    "usage": """n2wifi {version} —— 不开屏，从命令行管理 WiFi
+
+后端（自动检测，可用 N2WIFI_BACKEND 强制指定）：
+  android          Android 7+   WifiConfigStore.xml + 重载框架
+  nm               NetworkManager（nmcli，大多数桌面/服务器发行版）
+  wpa              wpa_supplicant（Debian/Raspbian/pmOS/嵌入式）
 
 用法：
+  n2wifi backend                 显示检测到的后端和判断依据
   n2wifi list                    列出已保存的网络
   n2wifi status                  当前 SSID / 信号 / 频段 / IP
   n2wifi ip                      只打印当前 IPv4（给脚本用）
   n2wifi scan                    扫描周边 AP（信号/频段/信道/加密）
   n2wifi scan --all              同上，但按 BSSID 全列（不做同名合并）
-  n2wifi join  <SSID> <密码>      写入 + 立刻重载框架（推荐）
+  n2wifi join  <SSID> <密码>      写入 + 立刻生效（推荐）
   n2wifi add   <SSID> <密码>      只写入（下次重载/重启才生效）
   n2wifi add   <SSID> --open      加一个开放网络
   n2wifi del   <SSID>             删除某个已保存的网络
-  n2wifi apply                    让 Android 重新加载配置（约 40 秒）
+  n2wifi apply                    让后端重新加载配置
   n2wifi backups                  列出自动备份
   n2wifi revert [文件]            用备份恢复（默认最新的）
 
@@ -139,22 +181,27 @@ M["zh"] = {
   -h, --help                      帮助
   -V, --version                   版本
 
+环境变量：
+  N2WIFI_BACKEND   android | nm | wpa     强制指定后端
+  N2WIFI_IFACE     例如 wlan0 或 wlp3s0   强制指定无线网卡
+  N2WIFI_XML       WifiConfigStore.xml 路径   （android）
+  N2WIFI_CONF      wpa_supplicant.conf 路径   （wpa）
+
 注意：
   * 必须 root（uid 0）
-  * 配置存储：/data/misc/wifi/WifiConfigStore.xml         （Android 7~10）
-              /data/misc/apexdata/com.android.wifi/...     （Android 11+）
-    两个路径会自动找；也可以用环境变量 N2WIFI_XML 指定
-  * 每次写入前自动备份成 WifiConfigStore.xml.n2bak-<时间戳>
-  * apply 会重启 system_server；WiFi 链路会抖 30~60 秒，ssh 也跟着断（走 USB 时
-    adb 也会消失，重新插拔即可）。实测机上手机本体不会重启，个别 ROM 可能会
+  * 每次写入前自动备份成 <配置文件>.n2bak-<时间戳>
+  * apply 各后端代价不同：
+      android  重启 system_server，链路抖 30~60 秒
+      wpa      wpa_cli reconfigure，通常不到 1 秒
+      nm       重新激活连接，1~3 秒
   * 文档：README.md / README.zh-CN.md""",
 
     "not_root": "请用 root 运行（uid 0）",
     "store_missing": "找不到 WiFi 配置存储。\n"
                      "  找过：{paths}\n"
                      "  这台是 Android 吗？可以用 N2WIFI_XML=/path/to/WifiConfigStore.xml 指定",
-    "no_iw": "找不到 iw。装一个（apt-get install -y iw），或保证 /system/bin/iw 在",
-    "scan_timeout": "扫描超时（wlan0 没起来？）",
+    "no_iw": "找不到 iw。装一个（apt-get install -y iw）或设置 N2WIFI_IFACE",
+    "scan_timeout": "扫描超时（网卡没起来？）",
     "scan_fail": "扫描失败：{err}",
     "scan_none": "没扫到任何 AP（WiFi 开了吗？）",
     "scan_head": "扫到 {aps} 个 AP（{ssids} 个不同 SSID）：",
@@ -179,13 +226,6 @@ M["zh"] = {
     "status_ip": "IP       : {v}",
     "status_saved": "已保存   : {n} 个 -> {list}",
     "not_connected": "（未连接）",
-    "apply_no_ss": "没找到 system_server，Android 框架是不是没起来？",
-    "apply_start": "正在让 Android 重新加载 WiFi 配置（重启 system_server，pid={pid}）...",
-    "apply_hint1": "  提示：框架重启时 wlan0 会抖一下，走 WiFi 的 ssh 一般会断 30~60 秒再自己连回来；",
-    "apply_hint2": "        走 USB 时 adb 也会消失（USB gadget 归 system_server 管），重新插拔即可。",
-    "apply_kill_fail": "杀 system_server 失败：{e}",
-    "apply_back": "[ok] system_server 已重新起来（pid={pid}，用了 {sec} 秒）",
-    "apply_late": "[!] 180 秒内没看到新的 system_server（可能整机重启了，等它自己回来）",
     "selfcheck_fail": "自检失败（{e}），已放弃写入，原文件没动",
     "ssid_empty": "SSID 不能为空",
     "need_psk": "需要密码（或用 --open）",
@@ -194,7 +234,7 @@ M["zh"] = {
     "write_verify_fail": "写入后校验失败，用 `n2wifi revert` 恢复（备份：{b}）",
     "added": "[ok] 已写入：{ssid}（原有 {old} 个 -> 现在 {new} 个）",
     "backup_line": "     备份：{b}",
-    "add_only_note": "     注意：现在只是写进文件；要让 Android 生效请跑 `n2wifi apply`",
+    "add_only_note": "     注意：现在只是写进文件；要让它生效请跑 `n2wifi apply`",
     "no_such_ssid": "没找到这个 SSID：{ssid}",
     "del_verify_fail": "删除后校验失败，用 `n2wifi revert` 恢复（备份：{b}）",
     "deleted": "[ok] 已删除：{ssid}（剩 {n} 个）",
@@ -202,12 +242,43 @@ M["zh"] = {
     "no_such_backup": "备份不存在：{p}",
     "bad_backup": "这个备份看起来不完整，拒绝恢复",
     "reverted": "[ok] 已从备份恢复：{p}",
-    "apply_note": "     让 Android 生效：n2wifi apply",
+    "apply_note": "     立即生效：n2wifi apply",
     "usage_add": "用法：n2wifi add <SSID> <密码>   或   n2wifi add <SSID> --open",
     "usage_join": "用法：n2wifi join <SSID> <密码>   或   n2wifi join <SSID> --open",
     "usage_del": "用法：n2wifi del <SSID>",
     "unknown_cmd": "未知命令：{cmd}\n\n{usage}",
     "wep_unsupported": "不支持 WEP",
+
+    # --- backend layer ---
+    "be_none": "没找到可用的 WiFi 后端。\n"
+               "  试过：Android WifiConfigStore.xml、nmcli（NetworkManager）、"
+               "wpa_supplicant.conf\n"
+               "  可以用 N2WIFI_BACKEND=android|nm|wpa 强制指定",
+    "be_header": "后端     : {name}  （{desc}）",
+    "be_store": "配置文件 : {path}",
+    "be_iface": "网卡     : {iface}",
+    "be_nm_off": "有 nmcli 但 NetworkManager 没在运行",
+    "desc_android": "Android WifiConfigStore.xml",
+    "desc_wpa": "wpa_supplicant",
+    "desc_nm": "NetworkManager",
+    "wpa_no_conf": "找不到 wpa_supplicant.conf（可用 N2WIFI_CONF=/path/to/wpa_supplicant.conf 指定）\n"
+                   "  找过：{paths}",
+    "wpa_no_cli": "找不到 wpa_cli —— 装 wpasupplicant，否则只写配置文件、不热重载",
+    "nm_add_fail": "nmcli 添加连接失败：{err}",
+    "nm_del_fail": "nmcli 删除连接失败：{err}",
+    "nm_apply_fail": "nmcli 激活连接失败：{err}",
+    "wpa_add_fail": "wpa_cli 添加网络失败：{err}",
+    "apply_android": "正在让 Android 重新加载 WiFi 配置（重启 system_server，pid={pid}）...",
+    "apply_android_hint1": "  提示：框架重启时 wlan0 会抖一下，走 WiFi 的 ssh 一般会断 30~60 秒再自己连回来；",
+    "apply_android_hint2": "        走 USB 时 adb 也会消失（USB gadget 归 system_server 管），重新插拔即可。",
+    "apply_no_ss": "没找到 system_server，Android 框架是不是没起来？",
+    "apply_kill_fail": "杀 system_server 失败：{e}",
+    "apply_back": "[ok] system_server 已重新起来（pid={pid}，用了 {sec} 秒）",
+    "apply_late": "[!] 180 秒内没看到新的 system_server（可能整机重启了，等它自己回来）",
+    "apply_wpa": "正在重载 wpa_supplicant（wpa_cli reconfigure）...",
+    "apply_wpa_restart": "wpa_cli 连不上，改为重启服务 ...",
+    "apply_nm": "正在通过 NetworkManager 激活 {ssid} ...",
+    "apply_nm_generic": "NetworkManager：重新应用配置 ...",
 }
 
 
@@ -236,8 +307,138 @@ def usage():
 
 
 # --------------------------------------------------------------------------
-# where the config lives
+# small helpers
 # --------------------------------------------------------------------------
+
+def die(msg, code=1):
+    print("error: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def run(args, timeout=30, check=False):
+    """Run a command, return (rc, stdout, stderr) as text. Never raises."""
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        if check and p.returncode != 0:
+            return p.returncode, p.stdout, (p.stderr or p.stdout).strip()
+        return p.returncode, p.stdout or "", (p.stderr or "").strip()
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout"
+    except (OSError, FileNotFoundError) as e:
+        return 127, "", str(e)
+
+
+def dw(s):
+    """terminal display width (CJK = 2 cells)"""
+    w = 0
+    for ch in str(s):
+        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return w
+
+
+def pad(s, width):
+    s = str(s)
+    return s + " " * max(0, width - dw(s))
+
+
+def _freq_num(freq):
+    """Accept both `2437` and `2437 MHz` (nmcli prints the unit)."""
+    if freq is None:
+        return None
+    m = re.search(r"\d+", str(freq))
+    return int(m.group(0)) if m else None
+
+
+def chan_of(freq):
+    f = _freq_num(freq)
+    if f is None:
+        return "?"
+    if f == 2484:
+        return "14"
+    if 2412 <= f <= 2472:
+        return str((f - 2407) // 5)
+    if 5000 < f < 5925:
+        return str((f - 5000) // 5)
+    return "?"
+
+
+def band_of(freq):
+    f = _freq_num(freq)
+    if f is None:
+        return "?"
+    if 2400 <= f < 2500:
+        return "2.4G"
+    if 4900 < f < 5925:
+        return "5G"
+    return str(f) + "M"
+
+
+def security_of(b):
+    if b.get("rsn") and b.get("wpa"):
+        return "WPA/WPA2"
+    if b.get("rsn"):
+        return "WPA2/WPA3"
+    if b.get("wpa"):
+        return "WPA"
+    if b.get("privacy"):
+        return "WEP"
+    return t("sec_open")
+
+
+def backup_file(path):
+    """Copy `path` to path.n2bak-<ts>, keeping the newest 20."""
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    dst = path + ".n2bak-" + ts
+    n = 2
+    while os.path.exists(dst):
+        dst = path + ".n2bak-" + ts + "-%d" % n
+        n += 1
+    shutil.copy2(path, dst)
+    try:
+        os.chmod(dst, 0o600)
+    except OSError:
+        pass
+    # prune: keep the newest 20 so a chatty script cannot fill the disk
+    old = sorted(glob.glob(path + ".n2bak-*"))[:-20]
+    for f in old:
+        try:
+            os.unlink(f)
+        except OSError:
+            pass
+    return dst
+
+
+# --------------------------------------------------------------------------
+# wireless interface detection
+# --------------------------------------------------------------------------
+
+def wireless_iface():
+    """N2WIFI_IFACE, else the first interface under /sys/class/net/*/wireless,
+    else wlan0."""
+    forced = (os.environ.get("N2WIFI_IFACE") or "").strip()
+    if forced:
+        return forced
+    for d in sorted(glob.glob("/sys/class/net/*/wireless")):
+        name = d.split("/")[4]
+        if name.startswith(("docker", "veth", "br-", "lo")):
+            continue
+        return name
+    # NetworkManager knows too, even when the driver does not expose /wireless
+    rc, out, _ = run(["nmcli", "-t", "-f", "DEVICE,TYPE", "device", "status"], timeout=8)
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split(":")
+            if len(parts) >= 2 and parts[1] == "wifi":
+                return parts[0]
+    return "wlan0"
+
+
+IFACE = wireless_iface()
+
+
+# ==========================================================================
+# BACKEND: Android (WifiConfigStore.xml)
+# ==========================================================================
 
 # A chroot has its own "/" so Android paths are only reachable through
 # /proc/1/root.  From an Android root shell /proc/1/root IS "/", so trying both
@@ -253,19 +454,27 @@ CANDIDATES = [
 
 UID, GID = 1000, 1000  # Android system
 
-
-def resolve_store():
-    override = os.environ.get("N2WIFI_XML")
-    if override:
-        return override
-    for p in CANDIDATES:
-        for cand in (p, ANDROID_ROOT + p):
-            if os.path.exists(cand):
-                return cand
-    return ANDROID_ROOT + CANDIDATES[0]
+_XML = None
 
 
-XML = resolve_store()
+def xml_path():
+    global _XML
+    if _XML is None:
+        override = os.environ.get("N2WIFI_XML")
+        if override:
+            _XML = override
+        else:
+            for p in CANDIDATES:
+                for cand in (p, ANDROID_ROOT + p):
+                    if os.path.exists(cand):
+                        _XML = cand
+                        break
+                if _XML:
+                    break
+            if not _XML:
+                _XML = ANDROID_ROOT + CANDIDATES[0]
+    return _XML
+
 
 TEMPLATE = """<Network>
 <WifiConfiguration>
@@ -320,25 +529,21 @@ NET_RE = re.compile(r"<Network>.*?</Network>", re.S)
 SSID_RE = re.compile(r'<string name="SSID">(.*?)</string>', re.S)
 
 
-# --------------------------------------------------------------------------
-# small helpers
-# --------------------------------------------------------------------------
-
-def die(msg, code=1):
-    print("error: " + msg, file=sys.stderr)
-    sys.exit(code)
-
-
 def xml_escape(s):
     return (s.replace("&", "&amp;").replace("<", "&lt;")
              .replace(">", "&gt;").replace('"', "&quot;"))
 
 
 def read_text():
-    if not os.path.exists(XML):
-        die(t("store_missing", paths="\n             ".join(
-            [XML] + [ANDROID_ROOT + p for p in CANDIDATES])))
-    with open(XML, "r", encoding="utf-8", errors="replace") as f:
+    p = xml_path()
+    if not os.path.exists(p):
+        tried = []
+        for c in CANDIDATES:
+            for cand in (c, ANDROID_ROOT + c):
+                if cand not in tried:
+                    tried.append(cand)
+        die(t("store_missing", paths="\n             ".join(tried)))
+    with open(p, "r", encoding="utf-8", errors="replace") as f:
         return f.read()
 
 
@@ -383,95 +588,10 @@ def iw_cmd(args):
     die(t("no_iw"))
 
 
-def current_connection():
-    info = {}
+def android_backup():
+    p = xml_path()
+    dst = backup_file(p)
     try:
-        out = subprocess.run(iw_cmd(["dev", "wlan0", "link"]),
-                             capture_output=True, text=True, timeout=15).stdout
-        m = re.search(r"SSID:\s*(.+)", out)
-        if m:
-            info["ssid"] = m.group(1).strip()
-        m = re.search(r"signal:\s*(.+)", out)
-        if m:
-            info["signal"] = m.group(1).strip()
-        m = re.search(r"freq:\s*(\d+)", out)
-        if m:
-            info["freq"] = m.group(1) + " MHz"
-    except Exception:
-        pass
-    try:
-        out = subprocess.run(["ip", "-4", "addr", "show", "wlan0"],
-                             capture_output=True, text=True, timeout=10).stdout
-        m = re.search(r"inet (\d+\.\d+\.\d+\.\d+/\d+)", out)
-        if m:
-            info["ip"] = m.group(1)
-    except Exception:
-        pass
-    return info
-
-
-def dw(s):
-    """terminal display width (CJK = 2 cells)"""
-    w = 0
-    for ch in str(s):
-        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
-    return w
-
-
-def pad(s, width):
-    s = str(s)
-    return s + " " * max(0, width - dw(s))
-
-
-def chan_of(freq):
-    try:
-        f = int(freq)
-    except Exception:
-        return "?"
-    if f == 2484:
-        return "14"
-    if 2412 <= f <= 2472:
-        return str((f - 2407) // 5)
-    if 5000 < f < 5925:
-        return str((f - 5000) // 5)
-    return "?"
-
-
-def band_of(freq):
-    try:
-        f = int(freq)
-    except Exception:
-        return "?"
-    if 2400 <= f < 2500:
-        return "2.4G"
-    if 4900 < f < 5925:
-        return "5G"
-    return str(f) + "M"
-
-
-def security_of(b):
-    if b["rsn"] and b["wpa"]:
-        return "WPA/WPA2"
-    if b["rsn"]:
-        return "WPA2/WPA3"
-    if b["wpa"]:
-        return "WPA"
-    if b["privacy"]:
-        return "WEP"
-    return t("sec_open")
-
-
-def backup():
-    ts = time.strftime("%Y%m%d-%H%M%S")
-    dst = XML + ".n2bak-" + ts
-    # two writes inside the same second must not clobber each other
-    n = 2
-    while os.path.exists(dst):
-        dst = XML + ".n2bak-" + ts + "-%d" % n
-        n += 1
-    shutil.copy2(XML, dst)
-    try:
-        os.chmod(dst, 0o600)
         os.chown(dst, UID, GID)
     except OSError:
         pass
@@ -479,7 +599,8 @@ def backup():
 
 
 def write_atomic(new_text):
-    tmp = XML + ".n2tmp"
+    p = xml_path()
+    tmp = p + ".n2tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(new_text)
     os.chmod(tmp, 0o600)
@@ -498,140 +619,8 @@ def write_atomic(new_text):
     except Exception as e:
         os.unlink(tmp)
         die(t("selfcheck_fail", e=e))
-    os.replace(tmp, XML)
+    os.replace(tmp, p)
 
-
-# --------------------------------------------------------------------------
-# commands: list / status / ip / scan
-# --------------------------------------------------------------------------
-
-def cmd_list():
-    nets = parse_networks(read_text())
-    if not nets:
-        print(t("no_saved"))
-        return
-    cur = current_connection().get("ssid")
-    print(t("saved_list", n=len(nets)))
-    for ssid, _ in nets:
-        mark = t("cur_mark") if cur and ssid == cur else ""
-        print("  " + ssid + mark)
-
-
-def cmd_status():
-    nets = parse_networks(read_text())
-    info = current_connection()
-    print(t("status_ssid", v=info.get("ssid", t("not_connected"))))
-    print(t("status_signal", v=info.get("signal", "-")))
-    print(t("status_band", v=info.get("freq", "-")))
-    print(t("status_ip", v=info.get("ip", "-")))
-    print(t("status_saved", n=len(nets), list=", ".join(s for s, _ in nets)))
-
-
-def cmd_ip():
-    ip = current_connection().get("ip")
-    if not ip:
-        die(t("not_connected"), 2)
-    print(ip.split("/")[0])
-
-
-def iw_scan():
-    err = ""
-    for _ in range(3):
-        try:
-            p = subprocess.run(iw_cmd(["dev", "wlan0", "scan"]),
-                               capture_output=True, text=True, timeout=45)
-        except subprocess.TimeoutExpired:
-            err = t("scan_timeout")
-            break
-        if p.returncode == 0 and "BSS " in p.stdout:
-            return p.stdout
-        err = (p.stderr or p.stdout).strip() or ("exit %d" % p.returncode)
-        if "busy" not in err.lower():
-            break
-        time.sleep(2)
-    die(t("scan_fail", err=err))
-
-
-def parse_scan(text):
-    out = []
-    cur = None
-    for line in text.splitlines():
-        if line.startswith("BSS "):
-            if cur:
-                out.append(cur)
-            m = re.match(r"BSS ([0-9a-fA-F:]{17})", line)
-            cur = {"bssid": m.group(1) if m else "?", "freq": "", "signal": None,
-                   "ssid": "", "privacy": False, "rsn": False, "wpa": False,
-                   "associated": "associated" in line}
-            continue
-        if cur is None:
-            continue
-        s = line.strip()
-        if s.startswith("freq:"):
-            cur["freq"] = s.split(":", 1)[1].strip()
-        elif s.startswith("signal:"):
-            m = re.search(r"(-?\d+(?:\.\d+)?)", s)
-            if m:
-                cur["signal"] = float(m.group(1))
-        elif s.startswith("SSID:"):
-            cur["ssid"] = s.split(":", 1)[1].strip()
-        elif s.startswith("capability:"):
-            cur["privacy"] = "Privacy" in s
-        elif s.startswith("RSN:"):
-            cur["rsn"] = True
-        elif s.startswith("WPA:"):
-            cur["wpa"] = True
-    if cur:
-        out.append(cur)
-    return out
-
-
-def cmd_scan(show_all=False):
-    aps = parse_scan(iw_scan())
-    if not aps:
-        print(t("scan_none"))
-        return
-    cur = current_connection().get("ssid")
-    saved = set(s for s, _ in parse_networks(read_text()))
-    if show_all:
-        rows = sorted(aps, key=lambda b: (b["signal"] is None, -(b["signal"] or -200)))
-    else:
-        best = {}
-        for b in aps:
-            k = b["ssid"] or t("hidden")
-            if k not in best or (b["signal"] or -200) > (best[k]["signal"] or -200):
-                best[k] = b
-        rows = sorted(best.values(), key=lambda b: -(b["signal"] or -200))
-    print(t("scan_head", aps=len(aps), ssids=len(rows)))
-    hdr = (pad(t("col_signal"), 10) + pad(t("col_band"), 6)
-           + pad(t("col_chan"), 6) + pad(t("col_sec"), 12))
-    if show_all:
-        hdr += pad(t("col_bssid"), 19)
-    print("  " + hdr + t("col_ssid"))
-    for b in rows:
-        name = b["ssid"] or t("hidden")
-        sig = ("%d dBm" % round(b["signal"])) if b["signal"] is not None else "-"
-        tags = []
-        if name == cur:
-            tags.append(t("tag_current"))
-        elif name in saved:
-            tags.append(t("tag_saved"))
-        if b["associated"]:
-            tags.append(t("tag_assoc"))
-        tail = ("   [" + ",".join(tags) + "]") if tags else ""
-        line = ("  " + pad(sig, 10) + pad(band_of(b["freq"]), 6)
-                + pad(chan_of(b["freq"]), 6) + pad(security_of(b), 12))
-        if show_all:
-            line += pad(b["bssid"], 19)
-        print(line + name + tail)
-    if not show_all:
-        print("")
-        print(t("scan_hint"))
-
-
-# --------------------------------------------------------------------------
-# commands: add / del / apply / backups / revert
-# --------------------------------------------------------------------------
 
 def _set_str(blk, name, value_xml):
     pat = re.compile(r'(<string name="%s">).*?(</string>)' % re.escape(name), re.S)
@@ -695,8 +684,6 @@ def make_block(text, ssid, psk=None, open_net=False):
         blk = _set_psk(blk, psk)
         config_key = ssid_x + "-WPA_PSK"
     blk = _set_str(blk, "ConfigKey", config_key)
-    blk = _set_str(blk, "SSID", ssid_x)
-    blk = _set_int(blk, "NumAssociation", 0)
     blk = _set_int(blk, "Status", 2)
     blk = _set_int(blk, "LastConnectUid", 0)
     blk = _set_bool(blk, "HasEverConnected", False)
@@ -710,50 +697,6 @@ def insert_block(text, block):
     if j < 0:
         die("WifiConfigStore.xml has no </NetworkList>")
     return text[:j] + block + "\n" + text[j:]
-
-
-def cmd_add(ssid, psk=None, open_net=False, remind=True):
-    if not ssid:
-        die(t("ssid_empty"))
-    if not open_net:
-        if not psk:
-            die(t("need_psk"))
-        if not (8 <= len(psk) <= 63):
-            die(t("psk_len"))
-    text = read_text()
-    existing = [s for s, _ in parse_networks(text)]
-    if ssid in existing:
-        die(t("already", ssid=ssid))
-    b = backup()
-    new_text = insert_block(text, make_block(text, ssid, psk, open_net))
-    write_atomic(new_text)
-    after = parse_networks(read_text())
-    if ssid not in [s for s, _ in after] or len(after) != len(existing) + 1:
-        die(t("write_verify_fail", b=b))
-    print(t("added", ssid=ssid, old=len(existing), new=len(after)))
-    print(t("backup_line", b=b))
-    if remind:
-        print(t("add_only_note"))
-
-
-def cmd_del(ssid):
-    text = read_text()
-    nets = parse_networks(text)
-    if not any(s == ssid for s, _ in nets):
-        die(t("no_such_ssid", ssid=ssid))
-    b = backup()
-    new_text = text
-    for s, blk in nets:
-        if s == ssid:
-            new_text = new_text.replace(blk, "")
-            break
-    write_atomic(new_text)
-    after = [s for s, _ in parse_networks(read_text())]
-    if ssid in after or len(after) != len(nets) - 1:
-        die(t("del_verify_fail", b=b))
-    print(t("deleted", ssid=ssid, n=len(after)))
-    print(t("backup_line", b=b))
-    print(t("apply_note"))
 
 
 def find_pid(name):
@@ -772,19 +715,702 @@ def find_pid(name):
     return None
 
 
-def cmd_apply():
-    """Make Android reload the Wi-Fi config.
+# ==========================================================================
+# BACKEND: NetworkManager (nmcli)
+# ==========================================================================
 
-    Killing system_server makes zygote exit and init start a fresh system_server,
-    which re-reads WifiConfigStore.xml.  netd and wpa_supplicant are untouched,
-    so the link (and our ssh session) normally stays alive.
+def nm_running():
+    rc, out, _ = run(["nmcli", "-t", "-f", "RUNNING", "general", "status"], timeout=8)
+    return rc == 0 and "running" in out.lower()
+
+
+def nm_unescape(s):
+    """nmcli -t escapes ':' and '\\' inside fields."""
+    return s.replace("\\:", ":").replace("\\\\", "\\")
+
+
+def nm_list():
+    """saved Wi-Fi *profiles* (connection names, which we keep == SSID).
+
+    Note: `nmcli -t` prints the raw settings name, so a Wi-Fi profile shows up
+    as `802-11-wireless`, not `wifi` (that is only the pretty-printed form).
+    Both spellings are accepted.
     """
+    rc, out, err = run(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"], timeout=15)
+    if rc != 0:
+        die(t("scan_fail", err=err or ("exit %d" % rc)))
+    out_list = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        if line.count(":") >= 1:
+            name, typ = line.rsplit(":", 1)
+        else:
+            continue
+        if typ.strip() in ("wifi", "802-11-wireless"):
+            out_list.append(nm_unescape(name.strip()))
+    return out_list
+
+
+def nm_add(ssid, psk=None, open_net=False):
+    # a profile whose name equals the SSID keeps `list`/`del` predictable.
+    # autoconnect is off so that `add` really means "write only, do not switch"
+    # -- `join`/`apply` turn it back on.
+    args = ["nmcli", "connection", "add", "type", "wifi",
+            "con-name", ssid, "ssid", ssid,
+            "connection.autoconnect", "no"]
+    if open_net:
+        args += ["wifi-sec.key-mgmt", "none"]
+    else:
+        args += ["wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", psk]
+    rc, out, err = run(args, timeout=60)
+    if rc != 0:
+        die(t("nm_add_fail", err=(err or out).strip() or ("exit %d" % rc)))
+    return None  # NetworkManager keeps its own profile files
+
+
+def nm_del(ssid):
+    # snapshot the keyfile first: `nmcli connection delete` has no undo
+    bak = None
+    p = nm_profile_path(ssid)
+    if p:
+        bak = backup_file(p)
+    rc, out, err = run(["nmcli", "connection", "delete", ssid], timeout=60)
+    if rc != 0:
+        die(t("nm_del_fail", err=(err or out).strip() or ("exit %d" % rc)))
+    return bak
+
+
+def nm_profile_path(ssid):
+    """path of the .nmconnection file, when NetworkManager uses the keyfile plugin"""
+    for d in ("/etc/NetworkManager/system-connections",
+              "/etc/NetworkManager/system-connections-merged"):
+        for pat in ("%s.nmconnection", "%s"):
+            p = os.path.join(d, pat % ssid)
+            if os.path.exists(p):
+                return p
+    return None
+
+
+def nm_apply(ssid=None):
+    target = ssid or (nm_list() or [None])[0]
+    if not target:
+        return
+    # `add` stores the profile with autoconnect off; activate means "use it now"
+    run(["nmcli", "connection", "modify", target, "connection.autoconnect", "yes"], timeout=30)
+    print(t("apply_nm", ssid=target))
+    rc, out, err = run(["nmcli", "connection", "up", target], timeout=120)
+    if rc != 0:
+        # not fatal: the profile is saved, it will come up on the next boot
+        print(t("nm_apply_fail", err=(err or out).strip() or ("exit %d" % rc)),
+              file=sys.stderr)
+
+
+# ==========================================================================
+# BACKEND: wpa_supplicant (wpa_supplicant.conf + wpa_cli)
+# ==========================================================================
+
+WPA_CONFS = [
+    "/etc/wpa_supplicant/wpa_supplicant-{iface}.conf",
+    "/etc/wpa_supplicant/wpa_supplicant.conf",
+    "/etc/wpa_supplicant.conf",
+]
+
+_WPA_CONF = None
+
+
+def wpa_conf():
+    global _WPA_CONF
+    if _WPA_CONF is None:
+        override = os.environ.get("N2WIFI_CONF")
+        if override:
+            _WPA_CONF = override
+        else:
+            for pat in WPA_CONFS:
+                p = pat.format(iface=IFACE)
+                if os.path.exists(p):
+                    _WPA_CONF = p
+                    break
+            if not _WPA_CONF:
+                _WPA_CONF = WPA_CONFS[0].format(iface=IFACE)
+    return _WPA_CONF
+
+
+def wpa_cli(args, timeout=20):
+    base = ["wpa_cli", "-i", IFACE]
+    if os.geteuid() == 0:
+        base = ["wpa_cli", "-i", IFACE, "-p", "/run/wpa_supplicant"]
+    return run(base + args, timeout=timeout)
+
+
+def wpa_live():
+    rc, out, _ = wpa_cli(["ping"])
+    return rc == 0 and "PONG" in out
+
+
+def parse_wpa_conf(text):
+    """[(ssid, block_text)] — a block is `network={ ... }` with its comments."""
+    out = []
+    for m in re.finditer(r"network\s*=\s*\{(.*?)\}", text, re.S):
+        body = m.group(1)
+        inner = re.search(r'ssid\s*=\s*(?:"([^"]*)"|([0-9a-fA-F]+))', body)
+        if not inner:
+            continue
+        if inner.group(1) is not None:
+            ssid = inner.group(1)
+        else:
+            try:
+                ssid = bytes.fromhex(inner.group(2)).decode("utf-8", "replace")
+            except Exception:
+                ssid = inner.group(2)
+        out.append((ssid, m.group(0)))
+    return out
+
+
+def wpa_list():
+    """Live list from wpa_cli when possible, otherwise parse the config file."""
+    if wpa_live():
+        rc, out, _ = wpa_cli(["list_networks"])
+        if rc == 0:
+            res = []
+            for line in out.splitlines()[1:]:
+                parts = line.split("\t")
+                if len(parts) >= 2 and parts[1]:
+                    res.append(parts[1])
+            if res or "network id" in out.lower():
+                return res
+    p = wpa_conf()
+    if not os.path.exists(p):
+        die(t("wpa_no_conf", paths="\n             ".join(
+            x.format(iface=IFACE) for x in WPA_CONFS)))
+    with open(p, "r", encoding="utf-8", errors="replace") as f:
+        return [s for s, _ in parse_wpa_conf(f.read())]
+
+
+def wpa_quote_password(psk):
+    """wpa_supplicant accepts a plaintext passphrase inside double quotes."""
+    return psk
+
+
+def wpa_add(ssid, psk=None, open_net=False):
+    if wpa_live():
+        rc, out, _ = wpa_cli(["add_network"])
+        nid = (out.strip().splitlines() or [""])[-1].strip()
+        if rc != 0 or not nid.isdigit():
+            die(t("wpa_add_fail", err=(out or "exit %d" % rc)))
+        wpa_cli(["set_network", nid, "ssid", '"%s"' % ssid])
+        if open_net:
+            wpa_cli(["set_network", nid, "key_mgmt", "NONE"])
+        else:
+            wpa_cli(["set_network", nid, "psk", '"%s"' % psk])
+        rc, out, _ = wpa_cli(["enable_network", nid])
+        rc2, out2, _ = wpa_cli(["save_config"])
+        if rc2 == 0 and "OK" in out2:
+            return None
+        # save_config refused (ctrl_interface not writable) -> fall through to the file
+    p = wpa_conf()
+    if not os.path.exists(p):
+        die(t("wpa_no_conf", paths="\n             ".join(
+            x.format(iface=IFACE) for x in WPA_CONFS)))
+    with open(p, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    if any(s == ssid for s, _ in parse_wpa_conf(text)):
+        die(t("already", ssid=ssid))
+    b = backup_file(p)
+    if open_net:
+        blk = ('network={\n\tssid="%s"\n\tkey_mgmt=NONE\n}\n' % ssid)
+    else:
+        blk = ('network={\n\tssid="%s"\n\tpsk="%s"\n}\n' % (ssid, wpa_quote_password(psk)))
+    with open(p, "a", encoding="utf-8") as f:
+        f.write("\n" + blk)
+    return b
+
+
+def wpa_del(ssid):
+    if wpa_live():
+        rc, out, _ = wpa_cli(["list_networks"])
+        nid = None
+        for line in out.splitlines()[1:]:
+            parts = line.split("\t")
+            if len(parts) >= 2 and parts[1] == ssid and parts[0].isdigit():
+                nid = parts[0]
+                break
+        if nid is not None:
+            wpa_cli(["remove_network", nid])
+            wpa_cli(["save_config"])
+            return None
+    p = wpa_conf()
+    if not os.path.exists(p):
+        die(t("wpa_no_conf", paths="\n             ".join(
+            x.format(iface=IFACE) for x in WPA_CONFS)))
+    with open(p, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    nets = parse_wpa_conf(text)
+    if not any(s == ssid for s, _ in nets):
+        die(t("no_such_ssid", ssid=ssid))
+    b = backup_file(p)
+    for s, blk in nets:
+        if s == ssid:
+            text = text.replace(blk, "", 1)
+            break
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(text)
+    return b
+
+
+def wpa_apply():
+    if wpa_live():
+        print(t("apply_wpa"))
+        rc, out, _ = wpa_cli(["reconfigure"])
+        if rc == 0:
+            time.sleep(2)
+            return
+    print(t("apply_wpa_restart"))
+    for svc in ("wpa_supplicant@" + IFACE, "wpa_supplicant", "networking"):
+        rc, _, _ = run(["systemctl", "restart", svc], timeout=90)
+        if rc == 0:
+            time.sleep(3)
+            return
+
+
+# ==========================================================================
+# BACKEND selection
+# ==========================================================================
+
+_ALIASES = {
+    "android": "android",
+    "nm": "nm", "networkmanager": "nm", "network-manager": "nm",
+    "wpa": "wpa", "wpa_supplicant": "wpa", "wpa-supplicant": "wpa",
+    "wpasupplicant": "wpa",
+}
+
+
+def detect_backend():
+    """Return 'android' | 'nm' | 'wpa' | None, plus a short reason."""
+    forced = (os.environ.get("N2WIFI_BACKEND") or "").strip().lower()
+    if forced:
+        b = _ALIASES.get(forced)
+        if not b:
+            die("N2WIFI_BACKEND must be one of: android, nm, wpa")
+        return b, "forced by N2WIFI_BACKEND"
+
+    # 1) Android: the config store exists
+    for p in CANDIDATES:
+        for cand in (p, ANDROID_ROOT + p):
+            if os.path.exists(cand):
+                return "android", cand
+
+    # 2) NetworkManager: binary present AND the daemon answers
+    if shutil.which("nmcli") and nm_running():
+        return "nm", "nmcli + running daemon"
+
+    # 3) wpa_supplicant: config file or a reachable control socket
+    for pat in WPA_CONFS:
+        p = pat.format(iface=IFACE)
+        if os.path.exists(p):
+            return "wpa", p
+    if shutil.which("wpa_cli") and wpa_live():
+        return "wpa", "wpa_cli control socket"
+
+    return None, ""
+
+
+_BE = None
+
+
+def backend():
+    """(name, detail) — resolved once."""
+    global _BE
+    if _BE is None:
+        _BE = detect_backend()
+    return _BE
+
+
+def backend_name():
+    return backend()[0] or ""
+
+
+def saved_networks():
+    """Saved SSID list, whichever backend is active."""
+    b = backend_name()
+    if b == "android":
+        return [s for s, _ in parse_networks(read_text())]
+    if b == "nm":
+        return nm_list()
+    if b == "wpa":
+        return wpa_list()
+    die(t("be_none"))
+
+
+def show_backend():
+    b, detail = backend()
+    if not b:
+        die(t("be_none"))
+    dst = {"android": "desc_android", "nm": "desc_nm", "wpa": "desc_wpa"}[b]
+    print(t("be_header", name=b, desc=t(dst)))
+    if b == "android":
+        print(t("be_store", path=xml_path()))
+    elif b == "wpa":
+        print(t("be_store", path=wpa_conf()))
+    else:
+        print(t("be_store", path="/etc/NetworkManager/system-connections/"))
+    print(t("be_iface", iface=IFACE))
+    if detail:
+        print("         (%s)" % detail)
+
+
+# --------------------------------------------------------------------------
+# connection state (all backends)
+# --------------------------------------------------------------------------
+
+def current_connection():
+    """{ssid, signal, freq, ip} — NetworkManager first, then iw, then ip."""
+    info = {}
+    b = backend_name()
+
+    if b == "nm":
+        rc, out, _ = run(["nmcli", "-t", "-f", "ACTIVE,SSID,SIGNAL,FREQ", "device", "wifi"],
+                         timeout=10)
+        if rc == 0:
+            for line in out.splitlines():
+                parts = [nm_unescape(x) for x in re.split(r"(?<!\\):", line)]
+                if len(parts) >= 4 and parts[0] == "yes":
+                    info["ssid"] = ":".join(parts[1:-2])
+                    info["signal"] = parts[-2].strip() + "%"
+                    fn = _freq_num(parts[-1])
+                    if fn:
+                        info["freq"] = str(fn) + " MHz"
+                    break
+
+    if not info.get("ssid") and shutil.which("iw"):
+        rc, out, _ = run(iw_cmd(["dev", IFACE, "link"]), timeout=15)
+        if rc == 0:
+            m = re.search(r"SSID:\s*(.+)", out)
+            if m:
+                info["ssid"] = m.group(1).strip()
+            m = re.search(r"signal:\s*(.+)", out)
+            if m:
+                info["signal"] = m.group(1).strip()
+            m = re.search(r"freq:\s*(\d+)", out)
+            if m:
+                info["freq"] = m.group(1) + " MHz"
+
+    rc, out, _ = run(["ip", "-4", "addr", "show", IFACE], timeout=10)
+    if rc == 0:
+        m = re.search(r"inet (\d+\.\d+\.\d+\.\d+/\d+)", out)
+        if m:
+            info["ip"] = m.group(1)
+    if "freq" not in info:
+        rc, out, _ = run(["iw", "dev", IFACE, "info"], timeout=10) if shutil.which("iw") else (1, "", "")
+        if rc == 0:
+            m = re.search(r"channel (\d+) \((\d+) MHz\)", out)
+            if m:
+                info["freq"] = m.group(2) + " MHz"
+    return info
+
+
+# --------------------------------------------------------------------------
+# commands: list / status / ip / scan
+# --------------------------------------------------------------------------
+
+def cmd_list():
+    nets = saved_networks()
+    if not nets:
+        print(t("no_saved"))
+        return
+    cur = current_connection().get("ssid")
+    print(t("saved_list", n=len(nets)))
+    for ssid in nets:
+        mark = t("cur_mark") if cur and ssid == cur else ""
+        print("  " + ssid + mark)
+
+
+def cmd_status():
+    nets = saved_networks()
+    info = current_connection()
+    f = info.get("freq")
+    band = ("%s (%s)" % (band_of(f), f)) if f else "-"
+    print(t("status_ssid", v=info.get("ssid", t("not_connected"))))
+    print(t("status_signal", v=info.get("signal", "-")))
+    print(t("status_band", v=band))
+    print(t("status_ip", v=info.get("ip", "-")))
+    print(t("status_saved", n=len(nets), list=", ".join(nets)))
+
+
+def cmd_ip():
+    ip = current_connection().get("ip")
+    if not ip:
+        die(t("not_connected"), 2)
+    print(ip.split("/")[0])
+
+
+def iw_scan():
+    err = ""
+    for _ in range(3):
+        try:
+            p = subprocess.run(iw_cmd(["dev", IFACE, "scan"]),
+                               capture_output=True, text=True, timeout=45)
+        except subprocess.TimeoutExpired:
+            err = t("scan_timeout")
+            break
+        if p.returncode == 0 and "BSS " in p.stdout:
+            return p.stdout
+        err = (p.stderr or p.stdout).strip() or ("exit %d" % p.returncode)
+        if "busy" not in err.lower():
+            break
+        time.sleep(2)
+    die(t("scan_fail", err=err))
+
+
+def parse_scan(text):
+    out = []
+    cur = None
+    for line in text.splitlines():
+        if line.startswith("BSS "):
+            if cur:
+                out.append(cur)
+            m = re.match(r"BSS ([0-9a-fA-F:]{17})", line)
+            cur = {"bssid": m.group(1) if m else "?", "freq": "", "signal": None,
+                   "ssid": "", "privacy": False, "rsn": False, "wpa": False,
+                   "associated": "associated" in line}
+            continue
+        if cur is None:
+            continue
+        s = line.strip()
+        if s.startswith("freq:"):
+            cur["freq"] = s.split(":", 1)[1].strip()
+        elif s.startswith("signal:"):
+            m = re.search(r"(-?\d+(?:\.\d+)?)", s)
+            if m:
+                cur["signal"] = float(m.group(1))
+        elif s.startswith("SSID:"):
+            cur["ssid"] = s.split(":", 1)[1].strip()
+        elif s.startswith("capability:"):
+            cur["privacy"] = "Privacy" in s
+        elif s.startswith("RSN:"):
+            cur["rsn"] = True
+        elif s.startswith("WPA:"):
+            cur["wpa"] = True
+    if cur:
+        out.append(cur)
+    return out
+
+
+def nm_scan():
+    """Fallback scan through NetworkManager (no iw needed).
+
+    `nmcli -t -f ... device wifi list` is colon-separated with '\\:' escapes.
+    Requested fields: BSSID,SSID,SIGNAL,FREQ,SECURITY.  FREQ is in MHz.
+    """
+    rc, out, err = run(["nmcli", "-t", "-f", "BSSID,SSID,SIGNAL,FREQ,SECURITY",
+                        "device", "wifi", "list", "--rescan", "yes"], timeout=60)
+    if rc != 0:
+        # older nmcli: retry without --rescan
+        rc, out, err = run(["nmcli", "-t", "-f", "BSSID,SSID,SIGNAL,FREQ,SECURITY",
+                            "device", "wifi", "list"], timeout=60)
+    if rc != 0:
+        die(t("scan_fail", err=(err or out).strip() or ("exit %d" % rc)))
+
+    aps = []
+    cur_ssid = None
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        # split on unescaped colons
+        parts = re.split(r"(?<!\\):", line)
+        parts = [nm_unescape(x) for x in parts]
+        if len(parts) < 5:
+            continue
+        bssid, ssid, sig, freq, sec = parts[0], parts[1], parts[2], parts[3], parts[4]
+        if not bssid:
+            # continuation row of the same SSID
+            ssid = cur_ssid or ""
+        cur_ssid = ssid
+        try:
+            signal = int(sig)
+        except ValueError:
+            signal = None
+        aps.append({
+            "bssid": bssid or "?",
+            "ssid": ssid or "",
+            "signal": signal,
+            "freq": freq,
+            "privacy": sec not in ("", "--"),
+            "rsn": "WPA2" in sec or "WPA3" in sec,
+            "wpa": sec.startswith("WPA1") or sec == "WPA1 WPA2",
+            "associated": False,
+            "sec": sec,
+            "pct": True,          # nmcli reports 0-100, iw reports dBm
+        })
+    return aps
+
+
+def cmd_scan(show_all=False):
+    raw = None
+    if shutil.which("iw"):
+        try:
+            raw = parse_scan(iw_scan())
+            for a in raw:
+                a["sec"] = security_of(a)
+        except SystemExit:
+            raw = None          # iw present but unusable -> fall back to nmcli
+    if raw is None:
+        if shutil.which("nmcli"):
+            raw = nm_scan()
+        else:
+            die(t("no_iw"))
+    aps = raw
+    if not aps:
+        print(t("scan_none"))
+        return
+    cur = current_connection().get("ssid")
+    try:
+        saved = set(saved_networks())
+    except SystemExit:
+        saved = set()
+    if show_all:
+        rows = sorted(aps, key=lambda b: (b["signal"] is None, -(b["signal"] or -200)))
+    else:
+        best = {}
+        for b in aps:
+            k = b["ssid"] or t("hidden")
+            if k not in best or (b["signal"] or -200) > (best[k]["signal"] or -200):
+                best[k] = b
+        rows = sorted(best.values(), key=lambda b: -(b["signal"] or -200))
+    print(t("scan_head", aps=len(aps), ssids=len(rows)))
+    hdr = (pad(t("col_signal"), 10) + pad(t("col_band"), 6)
+           + pad(t("col_chan"), 6) + pad(t("col_sec"), 12))
+    if show_all:
+        hdr += pad(t("col_bssid"), 19)
+    print("  " + hdr + t("col_ssid"))
+    for b in rows:
+        name = b["ssid"] or t("hidden")
+        if b["signal"] is None:
+            sig = "-"
+        elif b.get("pct"):
+            sig = "%d%%" % b["signal"]
+        else:
+            sig = "%d dBm" % round(b["signal"])
+        sec = b.get("sec") or security_of(b)
+        if sec.strip() in ("", "--"):
+            sec = t("sec_open")
+        tags = []
+        if name == cur:
+            tags.append(t("tag_current"))
+        elif name in saved:
+            tags.append(t("tag_saved"))
+        if b["associated"]:
+            tags.append(t("tag_assoc"))
+        tail = ("   [" + ",".join(tags) + "]") if tags else ""
+        line = ("  " + pad(sig, 10) + pad(band_of(b["freq"]), 6)
+                + pad(chan_of(b["freq"]), 6) + pad(sec, 12))
+        if show_all:
+            line += pad(b["bssid"], 19)
+        print(line + name + tail)
+    if not show_all:
+        print("")
+        print(t("scan_hint"))
+
+
+# --------------------------------------------------------------------------
+# commands: add / del / apply / backups / revert
+# --------------------------------------------------------------------------
+
+def cmd_add(ssid, psk=None, open_net=False, remind=True):
+    if not ssid:
+        die(t("ssid_empty"))
+    if not open_net:
+        if not psk:
+            die(t("need_psk"))
+        if not (8 <= len(psk) <= 63):
+            die(t("psk_len"))
+
+    b = backend_name()
+    if not b:
+        die(t("be_none"))
+
+    old = saved_networks()
+    if ssid in old:
+        die(t("already", ssid=ssid))
+
+    bak = None
+    if b == "android":
+        text = read_text()
+        bak = android_backup()
+        new_text = insert_block(text, make_block(text, ssid, psk, open_net))
+        write_atomic(new_text)
+    elif b == "nm":
+        nm_add(ssid, psk, open_net)
+    else:  # wpa
+        bak = wpa_add(ssid, psk, open_net)
+
+    after = saved_networks()
+    if ssid not in after or len(after) != len(old) + 1:
+        if bak:
+            die(t("write_verify_fail", b=bak))
+        die("write failed: the network did not appear afterwards")
+    print(t("added", ssid=ssid, old=len(old), new=len(after)))
+    if bak:
+        print(t("backup_line", b=bak))
+    if remind:
+        print(t("add_only_note"))
+
+
+def cmd_del(ssid):
+    b = backend_name()
+    if not b:
+        die(t("be_none"))
+    old = saved_networks()
+    if ssid not in old:
+        die(t("no_such_ssid", ssid=ssid))
+
+    bak = None
+    if b == "android":
+        text = read_text()
+        bak = android_backup()
+        new_text = text
+        for s, blk in parse_networks(text):
+            if s == ssid:
+                new_text = new_text.replace(blk, "")
+                break
+        write_atomic(new_text)
+    elif b == "nm":
+        bak = nm_del(ssid)
+    else:
+        bak = wpa_del(ssid)
+
+    after = saved_networks()
+    if ssid in after or len(after) != len(old) - 1:
+        if bak:
+            die(t("del_verify_fail", b=bak))
+        die("delete failed: the network is still there")
+    print(t("deleted", ssid=ssid, n=len(after)))
+    if bak:
+        print(t("backup_line", b=bak))
+    print(t("apply_note"))
+
+
+def cmd_apply(ssid=None):
+    b = backend_name()
+    if not b:
+        die(t("be_none"))
+
+    if b == "nm":
+        nm_apply(ssid)
+        return
+
+    if b == "wpa":
+        wpa_apply()
+        cmd_status()
+        return
+
+    # --- android: restart system_server so the framework re-reads the XML ---
     pid = find_pid("system_server")
     if not pid:
         die(t("apply_no_ss"))
-    print(t("apply_start", pid=pid))
-    print(t("apply_hint1"))
-    print(t("apply_hint2"))
+    print(t("apply_android", pid=pid))
+    print(t("apply_android_hint1"))
+    print(t("apply_android_hint2"))
     try:
         os.kill(pid, 9)
     except OSError as e:
@@ -801,7 +1427,6 @@ def cmd_apply():
         print(t("apply_back", pid=newpid, sec=int(time.time() - t0)))
     else:
         print(t("apply_late"))
-    # wait for the station to reassociate
     t1 = time.time()
     while time.time() - t1 < 90:
         time.sleep(3)
@@ -811,8 +1436,26 @@ def cmd_apply():
     cmd_status()
 
 
+def backup_globs():
+    """Where to look for backups, for the active backend."""
+    b = backend_name()
+    if b == "android":
+        return [xml_path() + ".n2bak-*"]
+    if b == "wpa":
+        return [wpa_conf() + ".n2bak-*"]
+    # nm: NetworkManager keyfile profiles
+    pats = []
+    for d in ("/etc/NetworkManager/system-connections",
+              "/etc/NetworkManager/system-connections-merged"):
+        pats.append(os.path.join(d, "*.n2bak-*"))
+    return pats
+
+
 def cmd_backups():
-    found = sorted(glob.glob(XML + ".n2bak-*"))
+    found = []
+    for g in backup_globs():
+        found.extend(glob.glob(g))
+    found.sort()
     if not found:
         print(t("no_backups"))
         return
@@ -822,30 +1465,48 @@ def cmd_backups():
 
 
 def cmd_revert(path=None):
+    cands = []
+    for g in backup_globs():
+        cands.extend(glob.glob(g))
+    cands.sort()
     if not path:
-        cands = sorted(glob.glob(XML + ".n2bak-*"))
         if not cands:
             die(t("no_backups"))
         path = cands[-1]
     if not os.path.exists(path):
         die(t("no_such_backup", p=path))
-    with open(path, "r", encoding="utf-8") as f:
-        chk = f.read()
-    if "<NetworkList>" not in chk:
-        die(t("bad_backup"))
-    shutil.copy2(path, XML)
-    try:
-        os.chmod(XML, 0o600)
-        os.chown(XML, UID, GID)
-    except OSError:
-        pass
+
+    b = backend_name()
+    if b == "android":
+        with open(path, "r", encoding="utf-8") as f:
+            chk = f.read()
+        if "<NetworkList>" not in chk:
+            die(t("bad_backup"))
+        shutil.copy2(path, xml_path())
+        try:
+            os.chmod(xml_path(), 0o600)
+            os.chown(xml_path(), UID, GID)
+        except OSError:
+            pass
+    else:
+        # wpa / nm: the backup is a copy of a real config file; strip the suffix
+        target = path.split(".n2bak-")[0]
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            chk = f.read()
+        if not chk.strip():
+            die(t("bad_backup"))
+        shutil.copy2(path, target)
+        if b == "nm":
+            # a restored keyfile is ignored until NetworkManager re-reads it
+            run(["nmcli", "connection", "reload"], timeout=30)
+
     print(t("reverted", p=path))
     print(t("apply_note"))
 
 
 def cmd_join(ssid, psk=None, open_net=False):
     cmd_add(ssid, psk, open_net, remind=False)
-    cmd_apply()
+    cmd_apply(ssid)
 
 
 # --------------------------------------------------------------------------
@@ -870,6 +1531,9 @@ def main():
         return
     if a[0] in ("-V", "--version", "version"):
         print("n2wifi " + VERSION)
+        return
+    if a[0] in ("backend", "backends"):
+        show_backend()
         return
 
     if os.geteuid() != 0:

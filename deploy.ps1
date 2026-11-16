@@ -1,13 +1,15 @@
 <#
-  deploy.ps1 -- copy n2wifi to one or many Android phones over ssh.
+  deploy.ps1 -- copy n2wifi to one or many hosts (Android phones or Linux boxes)
+                over ssh.
 
     .\deploy.ps1 -Serial 4bbc97a9                     # over USB (adb forward)
-    .\deploy.ps1 -IPs 192.168.1.50                    # one phone
+    .\deploy.ps1 -IPs 192.168.1.50                    # one host
     .\deploy.ps1 -Range 192.168.1.50-59               # a whole range
     .\deploy.ps1 -Range 192.168.1.50-59 -Key C:\Users\me\.ssh\id_ed25519
+    .\deploy.ps1 -IPs 192.168.1.162 -Port 22          # a normal Linux host
 
   Needs the OpenSSH client (ssh.exe / scp.exe, built into Windows 10+) and,
-  for -Serial, adb.  Exit code = number of phones that failed.
+  for -Serial, adb.  Exit code = number of targets that failed.
 #>
 [CmdletBinding()]
 param(
@@ -101,7 +103,7 @@ foreach ($h in $targets) {
         $fail++
         continue
     }
-    $out = & ssh @sshOpt -p $Port $where "chmod 755 '$Dest' && '$Dest' --version && '$Dest' list" 2>&1
+    $out = & ssh @sshOpt -p $Port $where "chmod 755 '$Dest' && '$Dest' --version && '$Dest' backend" 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "   [fail] pushed, but the self test failed:"
         $out | ForEach-Object { Write-Host "          $_" }
