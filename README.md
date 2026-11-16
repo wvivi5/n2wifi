@@ -99,30 +99,47 @@ Set `N2WIFI_IFACE=wlp3s0` if auto-detection picks the wrong one.
 `n2wifi` is one file. Copy it to `/usr/local/bin/n2wifi` (or anywhere in `PATH`) and make it
 executable.
 
-### 0. Straight from GitHub (no local copy of the repo -- easiest)
+### 0. Straight from GitHub (no local copy of the repo)
 
-There is only one file to install, so no `git clone` is needed:
+`n2wifi` is a single file, but **avoid** the `raw.githubusercontent.com`
+one-liner -- that host is frequently reset (or resolves to IPv6 only) on
+mainland networks, which shows up as `curl: (35) Recv failure: Connection
+reset by peer`. Use one of these instead:
+
+**A. With `git` (recommended -- `git pull` upgrades later)**
 
 ```sh
-sudo curl -fsSL -o /usr/local/bin/n2wifi \
-  https://raw.githubusercontent.com/wvivi5/n2wifi/main/n2wifi
-sudo chmod 755 /usr/local/bin/n2wifi
+git clone --depth 1 https://github.com/wvivi5/n2wifi.git
+cd n2wifi && sudo ./install.sh
+```
+
+**B. Without `git`** -- grab the tarball from `codeload` (GitHub's archive
+host, usually reachable):
+
+```sh
+curl -fsSL -o /tmp/n2wifi.tgz \
+  https://codeload.github.com/wvivi5/n2wifi/tar.gz/refs/heads/main
+mkdir -p /tmp/n2wifi && tar xzf /tmp/n2wifi.tgz -C /tmp/n2wifi --strip-components=1
+sudo /tmp/n2wifi/install.sh
+```
+
+Then:
+
+```sh
 n2wifi --version && n2wifi backend
 ```
 
-No `curl`? Use `wget -O` (busybox wget works too):
-
-```sh
-sudo wget -O /usr/local/bin/n2wifi \
-  https://raw.githubusercontent.com/wvivi5/n2wifi/main/n2wifi
-sudo chmod 755 /usr/local/bin/n2wifi
-```
-
-Upgrading is the same command again -- it overwrites the binary and leaves your
-configuration and backups alone.
+Upgrading is the same command again (`git pull`, or a fresh tarball); the
+configuration, the `.n2bak-*` backups and the `.n2snap-*` snapshots are left
+alone.
 
 > Do not download `install.sh` on its own: it reads `n2wifi` from its **own
-> directory** and will fail with `error: ./n2wifi not found`.
+> directory** and fails with `error: ./n2wifi not found`.
+>
+> If `raw.githubusercontent.com` happens to work from your network, the
+> single file is still the shortest route: `sudo curl -4 -fsSL -o
+> /usr/local/bin/n2wifi https://raw.githubusercontent.com/wvivi5/n2wifi/main/n2wifi
+> && sudo chmod 755 /usr/local/bin/n2wifi`
 
 ### A. On this machine (you already have a copy of the repo)
 

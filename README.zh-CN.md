@@ -90,29 +90,42 @@ $ n2wifi scan
 
 `n2wifi` 就是一个文件，复制到 `/usr/local/bin/n2wifi`（或任何在 `PATH` 里的地方）并给执行权限。
 
-### 0. 直接从 GitHub 装（手上没有仓库副本，最省事）
+### 0. 直接从 GitHub 装（手上没有仓库副本）
 
-只装一个文件，不用 clone：
+`n2wifi` 只有一个文件，但**不建议**用 `raw.githubusercontent.com` 那行 curl ——
+这个域名在国内经常被 RST（`curl: (35) Recv failure: Connection reset by peer`），
+而且它只解析出 IPv6 的时候更会直接失败。用下面两条中的任意一条：
+
+**A. 有 `git`（推荐，一次 clone 之后还能 `git pull` 升级）**
 
 ```sh
-sudo curl -fsSL -o /usr/local/bin/n2wifi \
-  https://raw.githubusercontent.com/wvivi5/n2wifi/main/n2wifi
-sudo chmod 755 /usr/local/bin/n2wifi
+git clone --depth 1 https://github.com/wvivi5/n2wifi.git
+cd n2wifi && sudo ./install.sh
+```
+
+**B. 没有 `git`** —— 从 `codeload`（GitHub 的打包下载域名，通常通）拿 tarball：
+
+```sh
+curl -fsSL -o /tmp/n2wifi.tgz \
+  https://codeload.github.com/wvivi5/n2wifi/tar.gz/refs/heads/main
+mkdir -p /tmp/n2wifi && tar xzf /tmp/n2wifi.tgz -C /tmp/n2wifi --strip-components=1
+sudo /tmp/n2wifi/install.sh
+```
+
+装完确认：
+
+```sh
 n2wifi --version && n2wifi backend
 ```
 
-没有 `curl` 就用 `wget -O`（busybox 的 wget 也可以）：
-
-```sh
-sudo wget -O /usr/local/bin/n2wifi \
-  https://raw.githubusercontent.com/wvivi5/n2wifi/main/n2wifi
-sudo chmod 755 /usr/local/bin/n2wifi
-```
-
-升级就是把这行再跑一次（覆盖原文件，配置和备份都不动）。
+升级就是重跑上面那条（`git pull` 或重新下 tarball）；配置文件、`.n2bak-*`
+备份、`.n2snap-*` 快照都不会被动。
 
 > 别只下 `install.sh`：它要读**同目录**下的 `n2wifi`，单独下会直接报
 > `error: ./n2wifi not found`。
+>
+> 如果你那边 `raw.githubusercontent.com` 恰好能通，也可以直接拿单文件：
+> `sudo curl -4 -fsSL -o /usr/local/bin/n2wifi https://raw.githubusercontent.com/wvivi5/n2wifi/main/n2wifi && sudo chmod 755 /usr/local/bin/n2wifi`
 
 ### A. 装在本机（已经有仓库副本：git clone 或解压 zip 之后）
 
