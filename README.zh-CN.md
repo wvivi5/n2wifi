@@ -89,7 +89,18 @@ $ n2wifi scan
 
 ## 安装
 
-`n2wifi` 就是一个文件，复制到 `/usr/local/bin/n2wifi`（或任何在 `PATH` 里的地方）并给执行权限。
+一条命令（root 下执行；**缺 python3 会自己装**）：
+
+```sh
+curl -fsSL https://codeload.github.com/wvivi5/n2wifi/tar.gz/refs/heads/main \
+  | tar xz -C /tmp && sh /tmp/n2wifi-main/install.sh
+```
+
+`n2wifi` 本体是一个文件，但装它需要 python3。目标机上没有的话，`install.sh`
+会自己用这台机器已有的包管理器装上（`apk` / `apt` / `dnf` / `yum` / `pacman` /
+`zypper` / `xbps` / `opkg` 全认），装完继续，不会中途让你去手动补依赖。
+不想让它动系统包就加 `--no-deps`（或 `N2WIFI_NO_DEPS=1`），它会停下来告诉你
+该敲哪条命令。
 
 ### 0. 直接从 GitHub 装（手上没有仓库副本）
 

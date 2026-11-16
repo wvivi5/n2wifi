@@ -96,8 +96,19 @@ Set `N2WIFI_IFACE=wlp3s0` if auto-detection picks the wrong one.
 
 ## Install
 
-`n2wifi` is one file. Copy it to `/usr/local/bin/n2wifi` (or anywhere in `PATH`) and make it
-executable.
+One command (as root; **python3 gets installed if it is missing**):
+
+```sh
+curl -fsSL https://codeload.github.com/wvivi5/n2wifi/tar.gz/refs/heads/main \
+  | tar xz -C /tmp && sh /tmp/n2wifi-main/install.sh
+```
+
+`n2wifi` itself is one file, but it needs python3. When the target does not have
+it, `install.sh` installs it through whatever package manager the box has
+(`apk` / `apt` / `dnf` / `yum` / `pacman` / `zypper` / `xbps` / `opkg` are all
+recognised) and then carries on -- you will not be dropped into a "go fix your
+dependencies" dead end. Use `--no-deps` (or `N2WIFI_NO_DEPS=1`) to keep it away
+from the package manager; it will then tell you exactly which command to run.
 
 ### 0. Straight from GitHub (no local copy of the repo)
 
