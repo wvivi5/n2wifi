@@ -15,7 +15,7 @@ import json
 import os
 import sys
 
-SRC = sys.argv[1] if len(sys.argv) > 1 else "/usr/local/bin/n2wifi-dev"
+SRC = sys.argv[1] if len(sys.argv) > 1 else "/usr/local/bin/n2wifi"
 
 ldr = importlib.machinery.SourceFileLoader("n2wifi", SRC)
 spec = importlib.util.spec_from_loader("n2wifi", ldr)
@@ -95,6 +95,7 @@ def run_case(name, timeline, cfg_extra=None, expect_phase=None, expect_rc=None,
 
     cfg = {"backend": "nm", "target": "NewNet", "old": "OldNet", "snap": None,
            "timeout": 12, "check": "ip", "strict": False, "marker": None,
+           "bounce": False, "anchor": None,
            "state": STATE, "log": LOG, "verify": 9}
     cfg.update(cfg_extra or {})
     for f in (STATE, LOG):
@@ -179,6 +180,46 @@ run_case("H target, no DHCP",
 run_case("J check=link, associated",
          [(999, st("NewNet", None, True))],
          cfg_extra={"check": "link"},
+         expect_phase="ok", expect_rc=0, forbid_calls=True)
+
+# K. level 1: the timeout expires with no uplink, the radio is power-cycled,
+#    and the backend re-picks a saved network on its own -> recovered, no
+#    rollback at all (this is the cheap path the user asked for)
+kc, krec = run_case("K radio bounce recovers",
+                    [(40, OFFLINE), (999, st("OldNet", "10.0.0.5/24"))],
+                    cfg_extra={"bounce": True, "bounce_wait": 30},
+                    expect_phase="recovered", expect_rc=0)
+kc_nm = [" ".join(c) for c in kc.calls if c and c[0] == "nmcli"]
+check("K: autoconnect off before bouncing",
+      "nmcli connection modify NewNet connection.autoconnect no" in kc_nm,
+      "got %s" % kc_nm)
+check("K: radio was actually cycled",
+      "nmcli radio wifi off" in kc_nm and "nmcli radio wifi on" in kc_nm,
+      "got %s" % kc_nm)
+check("K: no rollback", not any("delete" in c for c in kc_nm), "got %s" % kc_nm)
+
+# L. the power-cycle does not help either -> fall through to the snapshot/rollback
+lc, _ = run_case("L bounce, still dead",
+                 [(21, OFFLINE), (999, st("OldNet", "10.0.0.5/24"))],
+                 cfg_extra={"bounce": True, "bounce_wait": 6},
+                 expect_phase="rolledback", expect_rc=0)
+lc_nm = [" ".join(c) for c in lc.calls if c and c[0] == "nmcli"]
+check("L: bounced first, rolled back after",
+      "nmcli radio wifi off" in lc_nm and "nmcli connection delete NewNet" in lc_nm,
+      "got %s" % lc_nm)
+
+# M. anchor: joined the target, got an IP, but the landmark is unreachable
+#    -> that is somebody else's network, treat it as a failure
+run_case("M anchor unreachable",
+         [(15, st("NewNet", "10.0.0.9/24")), (999, st("OldNet", "10.0.0.5/24"))],
+         cfg_extra={"anchor": "192.168.68.1"},
+         rc_map={"ping -c 2 -W 2 192.168.68.1": 1},
+         expect_phase="rolledback", expect_rc=0, expect_calls=NMC_SEQ)
+
+# N. anchor reachable -> an ordinary success, nothing touched
+run_case("N anchor reachable",
+         [(999, st("NewNet", "10.0.0.9/24"))],
+         cfg_extra={"anchor": "192.168.68.1"},
          expect_phase="ok", expect_rc=0, forbid_calls=True)
 
 # I. android/wpa path: snapshot restore instead of nmcli

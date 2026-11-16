@@ -58,7 +58,9 @@ $ n2wifi scan
 - `add` / `join` / `del` —— 只写入 / 写入并立即切换 / 删除
 - `backend` —— 显示检测到哪个后端、用哪个配置文件、哪块网卡
 - **安全写入** —— 原子替换 + 提交前自检 + 每次写入都自动备份 + `revert` 回滚
-- **切坏了不会失联** —— `join` 前先放一个脱离会话的守卫，切完彻底没网就自动回滚到原来的网络（`--strict` / `--check` / `--timeout` 可调）
+- **切坏了不会失联** —— `join` 前先放一个脱离会话的守卫，切完没网就按三级阶梯自救：
+  后端自己回连 → 重启射频让系统自己挑 → 才回滚配置（`--strict` / `--check` / `--timeout` / `--bounce-wait` 可调）
+- **分得清"有网"和"回了自己家"** —— `--anchor 192.168.1.1`，连上了但 ping 不通路由器就算失败
 - **不手写格式（Android）** —— 新条目从系统自己写的 `<Network>` 块克隆，Android 版本间的字段差异不会把你的网络悄悄丢掉
 - **Android 上全程不碰 `wpa_supplicant`** —— 改配置时链路一直在跑
 - **没有隐藏依赖** —— 有 `iw` 就用 `iw`，没有就自动改用 `nmcli`
@@ -208,7 +210,8 @@ n2wifi join "SiteB-5G" "password"
 | `n2wifi scan --all` | 同上，但按 BSSID 全列（看一个 SSID 有几个 AP / 漫游点） |
 | `n2wifi add <SSID> <密码>` | 写入配置（下次重载/重启生效），会做密码长度校验 |
 | `n2wifi add <SSID> --open` | 加一个开放网络 |
-| `n2wifi join <SSID> <密码>` | `add` + `apply`，切坏了自动回滚（见下节） |
+| `n2wifi join <SSID> <密码>` | `add` + `apply`，切坏了自动自救（见下节） |
+| `n2wifi join <SSID> <密码> --anchor 192.168.1.1` | 同上，且要求切换后路由器仍 ping 得通 |
 | `n2wifi del <SSID>` | 删除某个已保存网络（需要 `apply` 才生效） |
 | `n2wifi apply` | 让后端重新加载配置（代价见上面的后端表） |
 | `n2wifi guard` | 上一次 `join` 的守卫判了什么、为什么 |
@@ -224,39 +227,57 @@ n2wifi join "SiteB-5G" "password"
 而是"机器没了" —— 没有 ssh、进不去，只能等人去断电重启。
 
 `join` 因此默认带一个守卫（guard）：**在生效之前**先起一个脱离会话的进程，
-它盯着链路；如果切完这台机器彻底没有上联了，它把**切换前的配置原样放回去**、
-重新激活**原来那个网络**。因为它自己一个 session（`setsid`），
-生效过程中 ssh 被掐断也不会把它带走。
+它盯着链路，切坏了就按三级阶梯自救 —— 越靠前越便宜：
+
+| 级 | 动作 | 代价 | 什么时候用得上 |
+|---|---|---|---|
+| 0 | 什么都不做，让后端自己的 `autoconnect` 把旧网络接回来 | 1~3 秒 | 大多数情况，`nm` 会自己搞定 |
+| 1 | 把新档案的 `autoconnect` 关掉 → **重启射频**（`nmcli radio wifi off/on`；android 用 `svc wifi disable/enable`；wpa 重启 supplicant）→ 等 `--bounce-wait` 秒 | 3~30 秒 | 后端卡在坏档案上、不肯自己挑别的时候 |
+| 2 | 把切换前的配置原样放回去（android/wpa）／删掉新档案并激活旧档案（nm） | 秒级~分钟级 | 前两级都没救回来 |
+
+守卫自己一个 session（`setsid`），生效过程中 ssh 被掐断也不会把它带走。
 
 ```
-$ n2wifi join "SiteB" "password"
+$ n2wifi join "SiteB" "password" --anchor 192.168.1.1
 [ok] added: SiteB  (1 -> 2 networks)
 [guard] safety net armed (pid 28411); was on: SiteA
-        if the box ends up with no uplink, it rolls back by itself (timeout 60s, check=ip)
+        no uplink -> power-cycle the radio first, roll back only if that fails (timeout 60s, check=ip)
+        anchor: 192.168.1.1 -- if it cannot be pinged the switch counts as failed,
+        even when the box is happily joined to some other network
 activating SiteB via NetworkManager ...
-     [armed] armed: target=SiteB old=SiteA check=ip timeout=60s
-[!] switch failed -> rolled back: re-activated SiteA; back on SiteA (192.168.1.9/24)
-     the new network was removed from the config; run join again to retry
+     [armed] armed: target=SiteB old=SiteA check=ip timeout=60s anchor=192.168.1.1
+     [bounce] no uplink after 60s (ssid=- ip=-); power-cycling the radio to let the backend re-pick a saved network
+[ok] the switch failed but a radio power-cycle got the link back:
+     radio power-cycle (nmcli radio wifi off/on) brought the link back on SiteA (192.168.1.9/24)
 
 Connected : SiteA
 ...
 ```
 
+如果第 1 级也没救回来，第 2 级才会动手，那时输出是回滚：
+
+```
+[!] switch failed -> rolled back: re-activated SiteA; back on SiteA (192.168.1.9/24)
+     the new network was removed from the config; run join again to retry
+```
+
 事后随时可以看它当时的判断：
 
 ```sh
-n2wifi guard          # 最后一条记录：phase / target / old / msg
+n2wifi guard          # 最后一条记录：phase / target / old / anchor / msg
 cat /run/n2wifi-guard.log
 ```
+
 
 ### 什么算"失败"——默认只在真的会失联时才回滚
 
 | 切完的状态 | 默认行为 | `--strict` |
 |---|---|---|
 | 连上了目标网络 | 成功 | 成功 |
+| 连上了，但 `--anchor` 指定的地址 ping 不通 | 回滚（进"别人家的网"了） | 回滚 |
 | 还连着旧网络（或别的网络），有 IP | **不动它**，只把新档案的 `autoconnect` 关掉 | 回滚 |
 | 关联上了但 DHCP 拿不到 IP | 回滚 | 回滚 |
-| 彻底没有 SSID / 没有 IP | 回滚 | 回滚 |
+| 彻底没有 SSID / 没有 IP | 先重启射频，还不行就回滚 | 跳过第 1 级，直接回滚 |
 | 机器本来就没连过任何网络 | 不回滚（没得回），只在日志里说明 | 同左 |
 
 判断"还有没有上联"的严格程度由 `--check` 控制：
@@ -268,7 +289,30 @@ cat /run/n2wifi-guard.log
 | `ping` | 有 IPv4，且默认网关 ping 得通（能抓"连上了但网是死的"） |
 
 `--timeout N` 是"生效之后最多等多久"（默认 android 120 / nm 60 / wpa 45 秒）。
+`--bounce-wait N` 是"重启射频之后给它多久自己连回来"（默认 30 秒）。
+`--no-bounce` 跳过第 1 级，直接回滚。
 `--no-guard` 关掉安全网，回到 2.0 的老行为。
+
+### `--anchor`：分清"连上了"和"连回了自己家"
+
+上面所有判据都只能回答"这台机器还有没有网"，回答不了"这是不是**你的**网"。
+这在只有手机热点、或者社区里有几个免密码 AP 的地方很致命：机器欢天喜地连上隔壁的
+Wi-Fi，守卫认为一切正常，你却从自己的局域网里再也找不到它。
+
+`--anchor` 就是给一个"必须还得通"的地标，一般填路由器：
+
+```sh
+n2wifi join "Home-5G" "password" --anchor 192.168.1.1
+```
+
+切完就算新网络给了 IP，只要 `192.168.1.1` ping 不通，就按失败处理，照样走上面的阶梯。
+换网段、连到访客网络、连到外面某个免费热点 —— 都瞒不过它。
+
+注意两点：
+
+- **只在同一个局域网里切换时用**。带出门去连别的网络时，锚点本来就不通，会导致一直回滚。
+- 锚点要选**稳定的固定 IP**（路由器本身），别填一个 DHCP 地址，也别填一个自己要测的设备。
+
 
 ### 回滚具体做了什么
 
@@ -288,6 +332,8 @@ cat /run/n2wifi-guard.log
   同样可能坏。这种用 `n2wifi revert` 退到 `.n2bak-*` 备份。
 - **你亲手把旧网络删了**（`n2wifi del` 之后才发现新的连不上）：没有"旧的"可回，守卫只会在日志里说清楚。
 - **整机重启 / 内核卡死**：那不是 WiFi 的问题。
+- **射频被彻底关掉**（`rfkill` hard block、驱动崩了、Wi-Fi 芯片没上电）：第 1 级的
+  `radio off/on` 也开不回来，只能回滚配置干等 —— 这种要看 `dmesg`，不是配置能修的。
 - 守卫只能保证"网络回来"，**不保证 IP 不变** —— 换 AP 之后 DHCP 给的新地址可能不一样，
   ssh 要用新 IP 连（这也是为什么建议在路由器上给这些机器做 DHCP 保留）。
 
