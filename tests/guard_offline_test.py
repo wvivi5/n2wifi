@@ -95,7 +95,7 @@ def run_case(name, timeline, cfg_extra=None, expect_phase=None, expect_rc=None,
 
     cfg = {"backend": "nm", "target": "NewNet", "old": "OldNet", "snap": None,
            "timeout": 12, "check": "ip", "strict": False, "marker": None,
-           "bounce": False, "anchor": None,
+           "bounce": False,
            "state": STATE, "log": LOG, "verify": 9}
     cfg.update(cfg_extra or {})
     for f in (STATE, LOG):
@@ -207,20 +207,6 @@ lc_nm = [" ".join(c) for c in lc.calls if c and c[0] == "nmcli"]
 check("L: bounced first, rolled back after",
       "nmcli radio wifi off" in lc_nm and "nmcli connection delete NewNet" in lc_nm,
       "got %s" % lc_nm)
-
-# M. anchor: joined the target, got an IP, but the landmark is unreachable
-#    -> that is somebody else's network, treat it as a failure
-run_case("M anchor unreachable",
-         [(15, st("NewNet", "10.0.0.9/24")), (999, st("OldNet", "10.0.0.5/24"))],
-         cfg_extra={"anchor": "192.168.68.1"},
-         rc_map={"ping -c 2 -W 2 192.168.68.1": 1},
-         expect_phase="rolledback", expect_rc=0, expect_calls=NMC_SEQ)
-
-# N. anchor reachable -> an ordinary success, nothing touched
-run_case("N anchor reachable",
-         [(999, st("NewNet", "10.0.0.9/24"))],
-         cfg_extra={"anchor": "192.168.68.1"},
-         expect_phase="ok", expect_rc=0, forbid_calls=True)
 
 # I. android/wpa path: snapshot restore instead of nmcli
 snap = "/tmp/n2wifi-test.conf.n2snap-prejoin"

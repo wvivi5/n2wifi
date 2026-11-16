@@ -17,7 +17,7 @@ import sys
 import time
 import unicodedata
 
-VERSION = "2.1.1"
+VERSION = "2.1.2"
 
 # --------------------------------------------------------------------------
 # i18n
@@ -53,8 +53,6 @@ Join options:
   --timeout N                    how long to wait for the new link (default: 120/60/45
                                  for android/nm/wpa)
   --check link|ip|ping           what counts as "connected" (default: ip)
-  --anchor IP                    a landmark (usually your router) that must stay
-                                 pingable -- catches "joined someone else's Wi-Fi"
   --strict                       roll back unless the target is actually connected
                                  (default: a box that is merely still online is left alone)
   --no-bounce                    skip the radio power-cycle, go straight to rollback
@@ -175,8 +173,6 @@ Notes:
     "guard_armed": "[guard] safety net armed (pid {pid}); was on: {old}",
     "guard_armed2": "        no uplink -> power-cycle the radio first, roll back only if that fails"
                     " (timeout {to}s, check={check})",
-    "guard_anchor": "        anchor: {ip} -- if it cannot be pinged the switch counts as failed,",
-    "guard_anchor2": "        even when the box is happily joined to some other network",
     "guard_nobounce": "        radio power-cycle disabled (--no-bounce): rollback only",
     "guard_off": "     guard disabled (--no-guard): a failed switch can leave you offline",
     "guard_spawn_fail": "[!] could not start the guard process; switching without a net",
@@ -193,7 +189,6 @@ Notes:
     "guard_log_hint": "     log: {p}",
     "bad_check": "--check expects one of: link, ip, ping",
     "bad_timeout": "--timeout expects a number of seconds",
-    "bad_anchor": "--anchor expects an IPv4 address, e.g. --anchor 192.168.1.1",
     "bad_bounce_wait": "--bounce-wait expects a positive number of seconds",
 }
 
@@ -224,8 +219,6 @@ M["zh"] = {
 join 的选项：
   --timeout N                     等新链路最多等多久（默认 android 120 / nm 60 / wpa 45 秒）
   --check link|ip|ping            什么才算"连上了"（默认 ip）
-  --anchor IP                     锚点（一般填路由器）：必须 ping 得通，
-                                  防"连上了邻居家的 WiFi"这种假成功
   --strict                        没真正连上目标网络就回滚
                                   （默认：只要还有网（哪怕停在旧网络）就不动它）
   --no-bounce                     跳过"重启 WiFi 让系统自己重连"这一级，直接回滚
@@ -344,8 +337,6 @@ join 的选项：
     "guard_armed": "[守卫] 已布好安全网（pid {pid}）；切换前在：{old}",
     "guard_armed2": "        切完没网 -> 先重启 WiFi 让系统自己重连，还不行才回滚"
                     "（超时 {to} 秒，判据 {check}）",
-    "guard_anchor": "        锚点 {ip}：ping 不通它就算切换失败，",
-    "guard_anchor2": "        哪怕这台机器已经高高兴兴地连上了别的网络",
     "guard_nobounce": "        已关掉重启 WiFi 这一级（--no-bounce）：只回滚",
     "guard_off": "     已关掉守卫（--no-guard）：切失败就可能直接失联",
     "guard_spawn_fail": "[!] 守卫进程没起来，这次等于没有安全网",
@@ -361,7 +352,6 @@ join 的选项：
     "guard_log_hint": "     日志：{p}",
     "bad_check": "--check 只能是 link、ip、ping 之一",
     "bad_timeout": "--timeout 需要一个秒数",
-    "bad_anchor": "--anchor 需要一个 IPv4 地址，例如 --anchor 192.168.1.1",
     "bad_bounce_wait": "--bounce-wait 需要正的秒数",
 }
 
@@ -1663,35 +1653,30 @@ def link_up():
         return False
 
 
-def ping_ok():
-    """Does the default gateway answer?  Catches 'associated but dead'."""
-    gw = None
+def default_gateway():
+    """The IPv4 default gateway, or None.
+
+    """
     rc, out, _ = run(["ip", "-4", "route", "show", "default"], timeout=10)
     if rc == 0:
         m = re.search(r"default\s+via\s+(\d+\.\d+\.\d+\.\d+)", out)
+        if m and not m.group(1).startswith("0."):
+            return m.group(1)
+    # no default route yet: fall back to the first on-link address
+    rc, out, _ = run(["ip", "-4", "route"], timeout=10)
+    if rc == 0:
+        m = re.search(r"(\d+\.\d+\.\d+\.\d+)\s+dev\s+" + re.escape(IFACE), out)
         if m:
-            gw = m.group(1)
+            return m.group(1)
+    return None
+
+
+def ping_ok():
+    """Does the default gateway answer?  Catches 'associated but dead'."""
+    gw = default_gateway()
     if not gw:
-        rc, out, _ = run(["ip", "-4", "route"], timeout=10)
-        if rc == 0:
-            m = re.search(r"(\d+\.\d+\.\d+\.\d+)\s+dev\s+" + re.escape(IFACE), out)
-            gw = m.group(1) if m else None
-    if not gw or gw.startswith("0.0.0.0"):
         return False
     rc, _, _ = run(["ping", "-c", "2", "-W", "2", gw], timeout=10)
-    return rc == 0
-
-
-def anchor_reachable(ip):
-    """Ping a fixed landmark (usually the router).
-
-    This is what tells "I am on *a* network" apart from "I am on *my*
-    network".  A box that happily joins the neighbour's open Wi-Fi has a
-    perfectly good uplink and is still unreachable from your desk.
-    """
-    if not ip:
-        return True
-    rc, _, _ = run(["ping", "-c", "2", "-W", "2", ip], timeout=12)
     return rc == 0
 
 
@@ -1857,22 +1842,9 @@ def guard_run(cfg):
     strict = bool(cfg.get("strict"))
     timeout = int(cfg.get("timeout") or 60)
     marker = cfg.get("marker")
-    anchor = cfg.get("anchor")
     bounce = cfg.get("bounce", True)
 
-    def evaluate():
-        """link_state, but with the anchor folded into `ok`."""
-        s = link_state(check)
-        if s["ok"] and anchor:
-            if not s["ip"] or not anchor_reachable(anchor):
-                s["ok"] = False
-                s["anchor_fail"] = True
-        return s
-
     def describe_fail(s):
-        if s.get("anchor_fail"):
-            return ("online via %s (%s) but %s is unreachable -- wrong network"
-                    % (s["ssid"] or "?", s["ip"] or "?", anchor))
         if strict and s["ok"]:
             return ("still on %s after %ds, not the target (--strict)"
                     % (s["ssid"] or s["ip"] or "?", timeout))
@@ -1882,8 +1854,7 @@ def guard_run(cfg):
     def note(phase, msg, **kw):
         rec = {"ts": int(time.time()), "phase": phase, "msg": msg,
                "target": target, "old": old, "backend": cfg.get("backend"),
-               "check": check, "strict": strict, "anchor": anchor,
-               "pid": os.getpid()}
+               "check": check, "strict": strict, "pid": os.getpid()}
         rec.update(kw)
         try:
             gwrite(st, rec)
@@ -1896,8 +1867,8 @@ def guard_run(cfg):
         except OSError:
             pass
 
-    note("armed", "armed: target=%s old=%s check=%s timeout=%ds anchor=%s"
-                  % (target, old or "-", check, timeout, anchor or "-"))
+    note("armed", "armed: target=%s old=%s check=%s timeout=%ds"
+                  % (target, old or "-", check, timeout))
 
     # Wait for the parent to say "apply finished" so the timeout is measured
     # from the switch, not from process start.  If the parent was killed
@@ -1912,7 +1883,7 @@ def guard_run(cfg):
         time.sleep(1)
 
     deadline = time.time() + timeout
-    s = evaluate()
+    s = link_state(check)
     while True:
         if s["ssid"] == target and s["ok"]:
             note("ok", "connected to %s (%s)" % (target, s["ip"] or "-"))
@@ -1920,7 +1891,7 @@ def guard_run(cfg):
         if time.time() >= deadline:
             break
         time.sleep(3)
-        s = evaluate()
+        s = link_state(check)
 
     # Still online, just not on the target: that is a successful outcome for
     # a headless box.  Only --strict treats it as a failure worth undoing.
@@ -1952,7 +1923,7 @@ def guard_run(cfg):
             wait = int(cfg.get("bounce_wait") or 30)
             t1 = time.time()
             while time.time() - t1 < wait:
-                s = evaluate()
+                s = link_state(check)
                 if s["ok"]:
                     note("recovered",
                          "radio power-cycle (%s) brought the link back on %s "
@@ -1984,9 +1955,6 @@ def guard_run(cfg):
     while time.time() - t1 < verify:
         s = link_state("link")
         if s["ssid"] == old:
-            # Deliberately no anchor check here: the anchor is only a way of
-            # telling "my LAN" from "some other LAN" while switching.  Once we
-            # are back on the network we came from, that question is answered.
             ip = link_state(check)["ip"]
             note("rolledback", "%s; back on %s (%s)" % (detail, old, ip or "-"),
                  ssid=old, ip=ip)
@@ -2073,21 +2041,19 @@ def cmd_guard():
     print("  phase  : %s" % rec.get("phase"))
     print("  target : %s" % rec.get("target"))
     print("  old    : %s" % (rec.get("old") or "-"))
-    if rec.get("anchor"):
-        print("  anchor : %s" % rec.get("anchor"))
     print("  msg    : %s" % rec.get("msg", ""))
     print(t("guard_log_hint", p=guard_log_path()))
 
 
 def cmd_join(ssid, psk=None, open_net=False, timeout=None, check="ip",
-             strict=False, guard=True, anchor=None, bounce=True,
-             bounce_wait=None):
+             strict=False, guard=True, bounce=True, bounce_wait=None):
     b = backend_name()
     if not b:
         die(t("be_none"))
 
     before = link_state("link")
     old_ssid = before.get("ssid")
+
     timeout = int(timeout or DEFAULT_GUARD_TIMEOUT.get(b, 60))
     verify = DEFAULT_VERIFY.get(b, 60)
 
@@ -2108,7 +2074,7 @@ def cmd_join(ssid, psk=None, open_net=False, timeout=None, check="ip",
         pass
     cfg = {"backend": b, "target": ssid, "old": old_ssid, "snap": snap,
            "timeout": timeout, "check": check, "strict": bool(strict),
-           "anchor": anchor, "bounce": bool(bounce),
+           "bounce": bool(bounce),
            "bounce_wait": int(bounce_wait or 30),
            "marker": marker, "state": guard_state_path(),
            "log": guard_log_path(), "verify": verify,
@@ -2121,9 +2087,6 @@ def cmd_join(ssid, psk=None, open_net=False, timeout=None, check="ip",
 
     print(t("guard_armed", pid=proc.pid, old=old_ssid or t("not_connected")))
     print(t("guard_armed2", to=timeout, check=check))
-    if anchor:
-        print(t("guard_anchor", ip=anchor))
-        print(t("guard_anchor2"))
     if not bounce:
         print(t("guard_nobounce"))
 
@@ -2201,12 +2164,6 @@ def main():
         check = pop_opt(a, "--check") or "ip"
         if check not in ("link", "ip", "ping"):
             die(t("bad_check"))
-        want_anchor = "--anchor" in a
-        anchor = pop_opt(a, "--anchor")
-        if want_anchor and not anchor:
-            die(t("bad_anchor"))
-        if anchor and not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", anchor):
-            die(t("bad_anchor"))
         bw = pop_opt(a, "--bounce-wait")
         if bw is not None:
             try:
@@ -2227,7 +2184,7 @@ def main():
             cmd_add(rest[0], psk, open_net)
         else:
             cmd_join(rest[0], psk, open_net, timeout=timeout, check=check,
-                     strict=strict, guard=not no_guard, anchor=anchor,
+                     strict=strict, guard=not no_guard,
                      bounce=not no_bounce, bounce_wait=bw)
     elif cmd == "del":
         if len(a) < 2:

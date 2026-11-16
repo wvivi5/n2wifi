@@ -66,8 +66,6 @@ what was picked and why. Override with `N2WIFI_BACKEND=android|nm|wpa`.
 - **A bad switch cannot strand you** — `join` arms a detached guard first and climbs a
   three-step ladder: backend autoconnect → radio power-cycle → rollback
   (`--strict` / `--check` / `--timeout` / `--bounce-wait` tune the decision)
-- **Tells "has a network" from "is on my network"** — `--anchor 192.168.1.1`: joined but
-  the router does not answer counts as a failure
 - **Format-proof (Android)** — new entries are cloned from a block the system wrote itself,
   so field changes between Android versions do not silently drop your network
 - **Never touches `wpa_supplicant` on Android** — the link keeps running while the config is rewritten
@@ -227,7 +225,6 @@ nothing is injected at boot.
 | `n2wifi add <SSID> <pass>` | Write the network to the store (takes effect on the next reload/reboot) |
 | `n2wifi add <SSID> --open` | Add an open network |
 | `n2wifi join <SSID> <pass>` | `add` + `apply`, with automatic self-rescue (next section) |
-| `n2wifi join <SSID> <pass> --anchor 192.168.1.1` | Same, and the router must still answer afterwards |
 | `n2wifi del <SSID>` | Remove a saved network (needs `apply` to take effect) |
 | `n2wifi apply` | Make the backend reload its config (see the backend table for the cost) |
 | `n2wifi guard` | What the last `join` guard decided, and why |
@@ -255,14 +252,12 @@ The guard runs in its own session (`setsid`), so the ssh connection dying mid-sw
 cannot kill the thing that is supposed to rescue you.
 
 ```
-$ n2wifi join "SiteB" "password" --anchor 192.168.1.1
+$ n2wifi join "SiteB" "password"
 [ok] added: SiteB  (1 -> 2 networks)
 [guard] safety net armed (pid 28411); was on: SiteA
         no uplink -> power-cycle the radio first, roll back only if that fails (timeout 60s, check=ip)
-        anchor: 192.168.1.1 -- if it cannot be pinged the switch counts as failed,
-        even when the box is happily joined to some other network
 activating SiteB via NetworkManager ...
-     [armed] armed: target=SiteB old=SiteA check=ip timeout=60s anchor=192.168.1.1
+     [armed] armed: target=SiteB old=SiteA check=ip timeout=60s
      [bounce] no uplink after 60s (ssid=- ip=-); power-cycling the radio to let the backend re-pick a saved network
 [ok] the switch failed but a radio power-cycle got the link back:
      radio power-cycle (nmcli radio wifi off/on) brought the link back on SiteA (192.168.1.9/24)
@@ -281,7 +276,7 @@ If step 1 fails too, step 2 takes over and the output looks like this:
 Ask it later what it decided:
 
 ```sh
-n2wifi guard          # last record: phase / target / old / anchor / msg
+n2wifi guard          # last record: phase / target / old / msg
 cat /run/n2wifi-guard.log
 ```
 
@@ -290,7 +285,6 @@ cat /run/n2wifi-guard.log
 | After the switch | Default | `--strict` |
 |---|---|---|
 | On the target network | success | success |
-| Connected, but the `--anchor` address does not answer | roll back (that is somebody else's network) | roll back |
 | Still on the old network (or another one) with an IP | **left alone**, only the new profile's `autoconnect` is turned back off | roll back |
 | Associated to the target but DHCP never completes | roll back | roll back |
 | No SSID / no IP at all | power-cycle the radio first, roll back if that fails | skip step 1, roll back |
@@ -308,31 +302,6 @@ How strictly "still has an uplink" is judged is `--check`:
 (default 120 / 60 / 45 s for android / nm / wpa). `--bounce-wait N` is how long the
 radio power-cycle gets to reconnect (default 30 s). `--no-bounce` skips step 1.
 `--no-guard` turns the net off (the 2.0 behaviour).
-
-### `--anchor`: "has a network" vs "is back on *my* network"
-
-Every check above answers "does this box still have an uplink", never "is this **your**
-uplink". That gap bites in places where a few APs share the air — the box cheerfully joins
-the neighbour's open Wi-Fi, the guard calls it a success, and you can no longer reach it
-from your own LAN.
-
-`--anchor` names a landmark that must stay reachable, usually the router:
-
-```sh
-n2wifi join "Home-5G" "password" --anchor 192.168.1.1
-```
-
-The new network can hand out a perfect DHCP lease; if `192.168.1.1` does not answer, the
-guard treats the switch as failed and climbs the ladder. Different subnet, guest network,
-some free hotspot outdoors — none of them get past it.
-
-Two caveats:
-
-- **Only use it when switching inside one LAN.** Take the box somewhere else and the anchor
-  is legitimately unreachable, so every `join` would roll back.
-- Use a **stable fixed address** (the router itself), not a DHCP lease and not a device you
-  are testing.
-
 
 ### What the rollback actually does
 
