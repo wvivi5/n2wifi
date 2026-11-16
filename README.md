@@ -96,7 +96,32 @@ Set `N2WIFI_IFACE=wlp3s0` if auto-detection picks the wrong one.
 `n2wifi` is one file. Copy it to `/usr/local/bin/n2wifi` (or anywhere in `PATH`) and make it
 executable.
 
-### A. On this machine (Linux / postmarketOS / any box you are logged into)
+### 0. Straight from GitHub (no local copy of the repo -- easiest)
+
+There is only one file to install, so no `git clone` is needed:
+
+```sh
+sudo curl -fsSL -o /usr/local/bin/n2wifi \
+  https://raw.githubusercontent.com/wvivi5/n2wifi/main/n2wifi
+sudo chmod 755 /usr/local/bin/n2wifi
+n2wifi --version && n2wifi backend
+```
+
+No `curl`? Use `wget -O` (busybox wget works too):
+
+```sh
+sudo wget -O /usr/local/bin/n2wifi \
+  https://raw.githubusercontent.com/wvivi5/n2wifi/main/n2wifi
+sudo chmod 755 /usr/local/bin/n2wifi
+```
+
+Upgrading is the same command again -- it overwrites the binary and leaves your
+configuration and backups alone.
+
+> Do not download `install.sh` on its own: it reads `n2wifi` from its **own
+> directory** and will fail with `error: ./n2wifi not found`.
+
+### A. On this machine (you already have a copy of the repo)
 
 ```sh
 sudo ./install.sh                 # installs to /usr/local/bin/n2wifi and prints the backend

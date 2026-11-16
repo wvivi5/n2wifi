@@ -89,7 +89,31 @@ $ n2wifi scan
 
 `n2wifi` 就是一个文件，复制到 `/usr/local/bin/n2wifi`（或任何在 `PATH` 里的地方）并给执行权限。
 
-### A. 装在本机（Linux / postmarketOS / 任何已经登录的机器）
+### 0. 直接从 GitHub 装（手上没有仓库副本，最省事）
+
+只装一个文件，不用 clone：
+
+```sh
+sudo curl -fsSL -o /usr/local/bin/n2wifi \
+  https://raw.githubusercontent.com/wvivi5/n2wifi/main/n2wifi
+sudo chmod 755 /usr/local/bin/n2wifi
+n2wifi --version && n2wifi backend
+```
+
+没有 `curl` 就用 `wget -O`（busybox 的 wget 也可以）：
+
+```sh
+sudo wget -O /usr/local/bin/n2wifi \
+  https://raw.githubusercontent.com/wvivi5/n2wifi/main/n2wifi
+sudo chmod 755 /usr/local/bin/n2wifi
+```
+
+升级就是把这行再跑一次（覆盖原文件，配置和备份都不动）。
+
+> 别只下 `install.sh`：它要读**同目录**下的 `n2wifi`，单独下会直接报
+> `error: ./n2wifi not found`。
+
+### A. 装在本机（已经有仓库副本：git clone 或解压 zip 之后）
 
 ```sh
 sudo ./install.sh          # 装到 /usr/local/bin/n2wifi，并打印检测到的后端
