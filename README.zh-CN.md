@@ -101,8 +101,21 @@ $ n2wifi scan
 
 ```sh
 git clone --depth 1 https://github.com/wvivi5/n2wifi.git
-cd n2wifi && sudo ./install.sh
+cd n2wifi && ./install.sh          # 已经是 root 就直接跑，不用 sudo
 ```
+
+clone 有时会失败在 HTTP/2 上（`RPC failed; curl 16 Error in the HTTP2 framing
+layer` / `fatal: expected flush after ref listing`），这是网络层的问题，不是你
+敲错了。退到 HTTP/1.1 再试，体积很小，慢一点无所谓：
+
+```sh
+git -c http.version=HTTP/1.1 clone --depth 1 https://github.com/wvivi5/n2wifi.git
+```
+
+还不行就直接走下面的 B（tarball 只有 47 KB）。
+
+> `sudo` 本身坏掉的时候（`/etc/sudo.conf is owned by uid ...`，常见于用 tar 解压
+> 覆盖过系统目录的机器）就别修 sudo 了 —— root 登录后直接 `./install.sh`。
 
 **B. 没有 `git`** —— 从 `codeload`（GitHub 的打包下载域名，通常通）拿 tarball：
 

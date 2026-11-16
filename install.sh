@@ -20,11 +20,15 @@ SRC=$(dirname "$0")/n2wifi
 if [ -z "${1:-}" ]; then
     DEST=${DEST:-/usr/local/bin/n2wifi}
     if ! command -v python3 >/dev/null 2>&1; then
-        echo "error: python3 not found -- install it first (apt-get install -y python3)" >&2
+        echo "error: python3 not found -- install it first, then re-run this script:" >&2
+        echo "         apt-get install -y python3   # Debian / Ubuntu" >&2
+        echo "         apk add python3              # Alpine / postmarketOS" >&2
+        echo "         pacman -S python             # Arch" >&2
         exit 1
     fi
     if [ "$(id -u)" -ne 0 ]; then
-        echo "error: run with sudo (writing to $DEST)" >&2
+        echo "error: run as root -- either 'sudo ./install.sh', or log in as root" >&2
+        echo "       (on a box where sudo itself is broken, 'su -' then re-run)" >&2
         exit 1
     fi
     install -m 755 "$SRC" "$DEST"

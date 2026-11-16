@@ -110,8 +110,23 @@ reset by peer`. Use one of these instead:
 
 ```sh
 git clone --depth 1 https://github.com/wvivi5/n2wifi.git
-cd n2wifi && sudo ./install.sh
+cd n2wifi && ./install.sh          # already root? skip sudo
 ```
+
+The clone itself sometimes dies on HTTP/2 (`RPC failed; curl 16 Error in the
+HTTP2 framing layer` / `fatal: expected flush after ref listing`). That is the
+network, not your typing. Force HTTP/1.1 -- the repo is tiny, the slowdown does
+not matter:
+
+```sh
+git -c http.version=HTTP/1.1 clone --depth 1 https://github.com/wvivi5/n2wifi.git
+```
+
+Still failing? Use B below (the tarball is 47 KB).
+
+> If `sudo` itself is broken (`/etc/sudo.conf is owned by uid ...`, which happens
+> on a rootfs that was unpacked as a non-root user), do not fix sudo -- log in as
+> root and run `./install.sh` directly.
 
 **B. Without `git`** -- grab the tarball from `codeload` (GitHub's archive
 host, usually reachable):
