@@ -19,7 +19,7 @@ set -e
 # Alpine and postmarketOS put apk in /sbin, and a root shell started in an
 # unusual way (su, a serial getty, a container) often has no /sbin in PATH.
 # Without this, `command -v apk` fails on a box that clearly has apk.
-PATH="$PATH:/sbin:/usr/sbin:/usr/local/sbin:/usr/local/bin"
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 export PATH
 
 NO_DEPS=0
@@ -155,7 +155,7 @@ scp -P "$PORT" "$SRC" "$HOST:$DEST"
 echo "-> check the interpreter on the target"
 if ssh -p "$PORT" "$HOST" "DEST='$DEST' sh -s" <<'TARGET'
 set -e
-PATH="$PATH:/sbin:/usr/sbin:/usr/local/sbin:/usr/local/bin"
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 export PATH
 
 if ! command -v python3 >/dev/null 2>&1; then
