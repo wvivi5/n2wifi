@@ -58,6 +58,7 @@ $ n2wifi scan
 - `add` / `join` / `del` —— 只写入 / 写入并立即切换 / 删除
 - `backend` —— 显示检测到哪个后端、用哪个配置文件、哪块网卡
 - **安全写入** —— 原子替换 + 提交前自检 + 每次写入都自动备份 + `revert` 回滚
+- **切坏了不会失联** —— `join` 前先放一个脱离会话的守卫，切完彻底没网就自动回滚到原来的网络（`--strict` / `--check` / `--timeout` 可调）
 - **不手写格式（Android）** —— 新条目从系统自己写的 `<Network>` 块克隆，Android 版本间的字段差异不会把你的网络悄悄丢掉
 - **Android 上全程不碰 `wpa_supplicant`** —— 改配置时链路一直在跑
 - **没有隐藏依赖** —— 有 `iw` 就用 `iw`，没有就自动改用 `nmcli`
@@ -194,14 +195,88 @@ n2wifi join "SiteB-5G" "password"
 | `n2wifi scan --all` | 同上，但按 BSSID 全列（看一个 SSID 有几个 AP / 漫游点） |
 | `n2wifi add <SSID> <密码>` | 写入配置（下次重载/重启生效），会做密码长度校验 |
 | `n2wifi add <SSID> --open` | 加一个开放网络 |
-| `n2wifi join <SSID> <密码>` | `add` + `apply` |
+| `n2wifi join <SSID> <密码>` | `add` + `apply`，切坏了自动回滚（见下节） |
 | `n2wifi del <SSID>` | 删除某个已保存网络（需要 `apply` 才生效） |
 | `n2wifi apply` | 让后端重新加载配置（代价见上面的后端表） |
+| `n2wifi guard` | 上一次 `join` 的守卫判了什么、为什么 |
 | `n2wifi backups` | 列出自动备份 |
 | `n2wifi revert [文件]` | 用备份恢复（默认最新），之后 `apply` |
 | `--lang en\|zh` | 输出语言（默认看 `LANG`，都没有就用英文） |
 
 退出码：`0` 成功，`1` 出错，`2` 未连接（`ip`）。
+
+## 切坏了就失联？`join` 会自己回滚
+
+无头机器的 WiFi 就是唯一的上联。所以一次失败的 `join` 不是"连错了网络"，
+而是"机器没了" —— 没有 ssh、进不去，只能等人去断电重启。
+
+`join` 因此默认带一个守卫（guard）：**在生效之前**先起一个脱离会话的进程，
+它盯着链路；如果切完这台机器彻底没有上联了，它把**切换前的配置原样放回去**、
+重新激活**原来那个网络**。因为它自己一个 session（`setsid`），
+生效过程中 ssh 被掐断也不会把它带走。
+
+```
+$ n2wifi join "SiteB" "password"
+[ok] added: SiteB  (1 -> 2 networks)
+[guard] safety net armed (pid 28411); was on: SiteA
+        if the box ends up with no uplink, it rolls back by itself (timeout 60s, check=ip)
+activating SiteB via NetworkManager ...
+     [armed] armed: target=SiteB old=SiteA check=ip timeout=60s
+[!] switch failed -> rolled back: re-activated SiteA; back on SiteA (192.168.1.9/24)
+     the new network was removed from the config; run join again to retry
+
+Connected : SiteA
+...
+```
+
+事后随时可以看它当时的判断：
+
+```sh
+n2wifi guard          # 最后一条记录：phase / target / old / msg
+cat /run/n2wifi-guard.log
+```
+
+### 什么算"失败"——默认只在真的会失联时才回滚
+
+| 切完的状态 | 默认行为 | `--strict` |
+|---|---|---|
+| 连上了目标网络 | 成功 | 成功 |
+| 还连着旧网络（或别的网络），有 IP | **不动它**，只把新档案的 `autoconnect` 关掉 | 回滚 |
+| 关联上了但 DHCP 拿不到 IP | 回滚 | 回滚 |
+| 彻底没有 SSID / 没有 IP | 回滚 | 回滚 |
+| 机器本来就没连过任何网络 | 不回滚（没得回），只在日志里说明 | 同左 |
+
+判断"还有没有上联"的严格程度由 `--check` 控制：
+
+| `--check` | 算连上的条件 |
+|---|---|
+| `link` | 有 SSID（或网卡 carrier up），不看 IP |
+| `ip`（默认） | 拿到 IPv4 地址 |
+| `ping` | 有 IPv4，且默认网关 ping 得通（能抓"连上了但网是死的"） |
+
+`--timeout N` 是"生效之后最多等多久"（默认 android 120 / nm 60 / wpa 45 秒）。
+`--no-guard` 关掉安全网，回到 2.0 的老行为。
+
+### 回滚具体做了什么
+
+| 后端 | 回滚动作 |
+|---|---|
+| `android` | 把 `WifiConfigStore.xml` 覆盖回切换前的快照 → 重启 `system_server` → 旧网络重新连上 |
+| `wpa` | 把 `wpa_supplicant.conf` 覆盖回快照 → `wpa_cli reconfigure`（或重启服务） |
+| `nm` | `nmcli connection delete <新档案>` → `connection reload` → `connection up <旧档案>` |
+
+快照是配置文件旁边的 `<文件>.n2snap-prejoin`（权限 `0600`），
+和 `.n2bak-<时间戳>` 那套自动备份分开，**不会**被 `backups` / `revert` 混进来。
+因为回滚是把配置恢复到切换前，**新加的条目在回滚后就没了** —— 要重试就再跑一次 `join`。
+
+### 它救不了什么
+
+- **配置本身写坏了**（SSID/密码对，但格式坏了导致后端起不来）：回滚用的是同一套写入路径，
+  同样可能坏。这种用 `n2wifi revert` 退到 `.n2bak-*` 备份。
+- **你亲手把旧网络删了**（`n2wifi del` 之后才发现新的连不上）：没有"旧的"可回，守卫只会在日志里说清楚。
+- **整机重启 / 内核卡死**：那不是 WiFi 的问题。
+- 守卫只能保证"网络回来"，**不保证 IP 不变** —— 换 AP 之后 DHCP 给的新地址可能不一样，
+  ssh 要用新 IP 连（这也是为什么建议在路由器上给这些机器做 DHCP 保留）。
 
 ### 同一条命令，三个后端分别做了什么
 

@@ -63,6 +63,9 @@ what was picked and why. Override with `N2WIFI_BACKEND=android|nm|wpa`.
 - `backend` — which backend was detected, which config file it uses, which interface
 - **Safe writes** — atomic replace, self-check before commit, automatic timestamped
   backup for every write, and `revert`
+- **A bad switch cannot strand you** — `join` arms a detached guard first; if the box
+  ends up with no uplink it rolls back to the previous network on its own
+  (`--strict` / `--check` / `--timeout` tune the decision)
 - **Format-proof (Android)** — new entries are cloned from a block the system wrote itself,
   so field changes between Android versions do not silently drop your network
 - **Never touches `wpa_supplicant` on Android** — the link keeps running while the config is rewritten
@@ -204,14 +207,92 @@ nothing is injected at boot.
 | `n2wifi scan --all` | Same, but every BSSID (see how many APs / roaming points a SSID has) |
 | `n2wifi add <SSID> <pass>` | Write the network to the store (takes effect on the next reload/reboot) |
 | `n2wifi add <SSID> --open` | Add an open network |
-| `n2wifi join <SSID> <pass>` | `add` + `apply` |
+| `n2wifi join <SSID> <pass>` | `add` + `apply`, with automatic rollback (next section) |
 | `n2wifi del <SSID>` | Remove a saved network (needs `apply` to take effect) |
 | `n2wifi apply` | Make the backend reload its config (see the backend table for the cost) |
+| `n2wifi guard` | What the last `join` guard decided, and why |
 | `n2wifi backups` | List the automatic backups |
 | `n2wifi revert [file]` | Restore a backup (default: newest), then `apply` |
 | `--lang en\|zh` | Output language (default: from `LANG`, otherwise English) |
 
 Exit codes: `0` ok, `1` error, `2` not connected (`ip`).
+
+## A bad switch cannot strand the box: `join` rolls back
+
+On a headless box Wi-Fi *is* the uplink. A failed `join` is therefore not "wrong network",
+it is "the box is gone" — no ssh, no way in, until somebody power-cycles it.
+
+So `join` carries a guard. **Before** the switch is applied it spawns a detached process
+that watches the link; if the box ends up with no uplink at all, the guard puts the
+pre-switch config back exactly as it was and re-activates the network it came from.
+The guard runs in its own session (`setsid`), so the ssh connection dying mid-switch
+cannot kill the thing that is supposed to rescue you.
+
+```
+$ n2wifi join "SiteB" "password"
+[ok] added: SiteB  (1 -> 2 networks)
+[guard] safety net armed (pid 28411); was on: SiteA
+        if the box ends up with no uplink, it rolls back by itself (timeout 60s, check=ip)
+activating SiteB via NetworkManager ...
+     [armed] armed: target=SiteB old=SiteA check=ip timeout=60s
+[!] switch failed -> rolled back: re-activated SiteA; back on SiteA (192.168.1.9/24)
+     the new network was removed from the config; run join again to retry
+
+Connected : SiteA
+...
+```
+
+Ask it later what it decided:
+
+```sh
+n2wifi guard          # last record: phase / target / old / msg
+cat /run/n2wifi-guard.log
+```
+
+### What counts as a failure
+
+| After the switch | Default | `--strict` |
+|---|---|---|
+| On the target network | success | success |
+| Still on the old network (or another one) with an IP | **left alone**, only the new profile's `autoconnect` is turned back off | roll back |
+| Associated to the target but DHCP never completes | roll back | roll back |
+| No SSID / no IP at all | roll back | roll back |
+| Nothing was connected before the switch | no rollback (nothing to go back to), only noted in the log | same |
+
+How strictly "still has an uplink" is judged is `--check`:
+
+| `--check` | Connected means |
+|---|---|
+| `link` | there is an SSID (or the interface carrier is up); IP is ignored |
+| `ip` (default) | there is an IPv4 address |
+| `ping` | IPv4 exists **and** the default gateway answers (catches "associated but dead") |
+
+`--timeout N` is how long to give the new link *after* the switch was applied
+(default 120 / 60 / 45 s for android / nm / wpa). `--no-guard` turns the net off
+(the 2.0 behaviour).
+
+### What the rollback actually does
+
+| Backend | Rollback |
+|---|---|
+| `android` | copy `WifiConfigStore.xml` back from the pre-join snapshot → restart `system_server` → the old network reconnects |
+| `wpa` | copy `wpa_supplicant.conf` back from the snapshot → `wpa_cli reconfigure` (or restart the service) |
+| `nm` | `nmcli connection delete <new>` → `connection reload` → `connection up <old>` |
+
+The snapshot is a sibling file `<config>.n2snap-prejoin` (mode `0600`), kept apart from the
+`.n2bak-<timestamp>` backups so `backups` / `revert` never mix the two up.
+Because the rollback restores the config as it was, **the newly added entry is gone after a
+rollback** — just run `join` again to retry.
+
+### What it cannot save you from
+
+- **A broken config write** (right SSID/password, corrupt format): the rollback uses the same
+  write path, so it can fail the same way. Use `n2wifi revert` to go back to a `.n2bak-*` backup.
+- **You deleted the old network yourself** (`n2wifi del`, then found the new one does not work):
+  there is no "old" left to return to; the guard says so in its log.
+- **A reboot or a kernel hang** — that is not a Wi-Fi problem.
+- The guard restores *connectivity*, not the *IP address* — DHCP may hand out a different
+  address after changing AP, so reserve addresses on the router for these boxes.
 
 ### Same command, different backend
 

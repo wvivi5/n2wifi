@@ -8,6 +8,7 @@ Docs: README.md (English) / README.zh-CN.md (Chinese).
 """
 
 import glob
+import json
 import os
 import re
 import shutil
@@ -16,7 +17,7 @@ import sys
 import time
 import unicodedata
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 # --------------------------------------------------------------------------
 # i18n
@@ -39,13 +40,22 @@ Usage:
   n2wifi ip                      print the current IPv4 address (for scripts)
   n2wifi scan                    scan nearby APs (signal/band/channel/security)
   n2wifi scan --all              same, but list every BSSID (no merging)
-  n2wifi join  <SSID> <pass>     add + activate now (recommended)
+  n2wifi join  <SSID> <pass>     add + activate now (auto-rollback if it strands you)
   n2wifi add   <SSID> <pass>     add only (takes effect on next reload/reboot)
   n2wifi add   <SSID> --open     add an open network
   n2wifi del   <SSID>            remove a saved network
   n2wifi apply                   make the backend pick up the new config
+  n2wifi guard                   what the last switch guard decided
   n2wifi backups                 list automatic backups
   n2wifi revert [file]           restore a backup (default: the newest)
+
+Join options:
+  --timeout N                    how long to wait for the new link (default: 120/60/45
+                                 for android/nm/wpa)
+  --check link|ip|ping           what counts as "connected" (default: ip)
+  --strict                       roll back unless the target is actually connected
+                                 (default: a box that is merely still online is left alone)
+  --no-guard                     switch without the safety net (old behaviour)
 
 Options:
   --lang en|zh                   output language (default: from LANG, else en)
@@ -57,10 +67,15 @@ Environment:
   N2WIFI_IFACE     e.g. wlan0 or wlp3s0   force the wireless interface
   N2WIFI_XML       path to WifiConfigStore.xml       (android)
   N2WIFI_CONF      path to wpa_supplicant.conf       (wpa)
+  N2WIFI_STATE_DIR where the guard keeps its state (default: /run, else /tmp)
 
 Notes:
   * must run as root (uid 0)
   * every write is backed up first (<config>.n2bak-<timestamp>)
+  * `join` arms a detached guard before applying: if the box ends up with no
+    uplink at all, the guard puts the pre-join config back and re-activates the
+    old network.  It runs in its own session, so a dropped ssh cannot kill it.
+    Ask it later with `n2wifi guard`.
   * `apply` cost per backend:
       android  restarts system_server, the link blips 30-60 s
       wpa      wpa_cli reconfigure, usually sub-second
@@ -151,6 +166,25 @@ Notes:
     "apply_wpa_restart": "wpa_cli not reachable, restarting the service instead ...",
     "apply_nm": "activating {ssid} via NetworkManager ...",
     "apply_nm_generic": "NetworkManager: re-applying the profile ...",
+
+    # --- join guard ---
+    "guard_armed": "[guard] safety net armed (pid {pid}); was on: {old}",
+    "guard_armed2": "        if the box ends up with no uplink, it rolls back by itself"
+                    " (timeout {to}s, check={check})",
+    "guard_off": "     guard disabled (--no-guard): a failed switch can leave you offline",
+    "guard_spawn_fail": "[!] could not start the guard process; switching without a net",
+    "guard_phase": "     [{phase}] {msg}",
+    "guard_ok": "[ok] {msg}",
+    "guard_rolledback": "[!] switch failed -> rolled back: {msg}",
+    "guard_failed": "[x] switch failed and the rollback did not get the uplink back: {msg}",
+    "guard_retry": "     the new network was removed from the config; run join again to retry",
+    "guard_pending": "[..] the guard is still running in the background;"
+                     " see `n2wifi guard` ({p})",
+    "guard_none": "no guard record yet (run `n2wifi join`)",
+    "guard_last": "last switch guard ({ts}):",
+    "guard_log_hint": "     log: {p}",
+    "bad_check": "--check expects one of: link, ip, ping",
+    "bad_timeout": "--timeout expects a number of seconds",
 }
 
 M["zh"] = {
@@ -168,13 +202,21 @@ M["zh"] = {
   n2wifi ip                      只打印当前 IPv4（给脚本用）
   n2wifi scan                    扫描周边 AP（信号/频段/信道/加密）
   n2wifi scan --all              同上，但按 BSSID 全列（不做同名合并）
-  n2wifi join  <SSID> <密码>      写入 + 立刻生效（推荐）
+  n2wifi join  <SSID> <密码>      写入 + 立刻生效（切坏了会自动回滚）
   n2wifi add   <SSID> <密码>      只写入（下次重载/重启才生效）
   n2wifi add   <SSID> --open      加一个开放网络
   n2wifi del   <SSID>             删除某个已保存的网络
   n2wifi apply                    让后端重新加载配置
+  n2wifi guard                    看上次切换守卫的判定结果
   n2wifi backups                  列出自动备份
   n2wifi revert [文件]            用备份恢复（默认最新的）
+
+join 的选项：
+  --timeout N                     等新链路最多等多久（默认 android 120 / nm 60 / wpa 45 秒）
+  --check link|ip|ping            什么才算"连上了"（默认 ip）
+  --strict                        没真正连上目标网络就回滚
+                                  （默认：只要还有网（哪怕停在旧网络）就不动它）
+  --no-guard                      不要安全网，用老行为
 
 选项：
   --lang en|zh                    输出语言（默认看 LANG，都没有就用英文）
@@ -186,10 +228,14 @@ M["zh"] = {
   N2WIFI_IFACE     例如 wlan0 或 wlp3s0   强制指定无线网卡
   N2WIFI_XML       WifiConfigStore.xml 路径   （android）
   N2WIFI_CONF      wpa_supplicant.conf 路径   （wpa）
+  N2WIFI_STATE_DIR 守卫的状态/日志放哪（默认 /run，没有就 /tmp）
 
 注意：
   * 必须 root（uid 0）
   * 每次写入前自动备份成 <配置文件>.n2bak-<时间戳>
+  * join 在生效前会先放一个脱离会话的守卫进程：如果切完彻底没网，它会把
+    切换前的配置放回去、重新激活原来那个网络。它自己一个 session，
+    ssh 断了也不会被带走。事后用 `n2wifi guard` 看它的结论。
   * apply 各后端代价不同：
       android  重启 system_server，链路抖 30~60 秒
       wpa      wpa_cli reconfigure，通常不到 1 秒
@@ -279,6 +325,24 @@ M["zh"] = {
     "apply_wpa_restart": "wpa_cli 连不上，改为重启服务 ...",
     "apply_nm": "正在通过 NetworkManager 激活 {ssid} ...",
     "apply_nm_generic": "NetworkManager：重新应用配置 ...",
+
+    # --- join 守卫 ---
+    "guard_armed": "[守卫] 已布好安全网（pid {pid}）；切换前在：{old}",
+    "guard_armed2": "        如果切完彻底没网，它会自己回滚到原来那个"
+                    "（超时 {to} 秒，判据 {check}）",
+    "guard_off": "     已关掉守卫（--no-guard）：切失败就可能直接失联",
+    "guard_spawn_fail": "[!] 守卫进程没起来，这次等于没有安全网",
+    "guard_phase": "     [{phase}] {msg}",
+    "guard_ok": "[ok] {msg}",
+    "guard_rolledback": "[!] 切换失败，已自动回滚：{msg}",
+    "guard_failed": "[x] 切换失败，而且回滚也没把网救回来：{msg}",
+    "guard_retry": "     新网络已从配置里撤掉；要重试就再跑一次 join",
+    "guard_pending": "[..] 守卫还在后台跑，稍后看 `n2wifi guard`（{p}）",
+    "guard_none": "还没有守卫记录（跑一次 `n2wifi join` 才会有）",
+    "guard_last": "上次切换守卫的结果（{ts}）：",
+    "guard_log_hint": "     日志：{p}",
+    "bad_check": "--check 只能是 link、ip、ping 之一",
+    "bad_timeout": "--timeout 需要一个秒数",
 }
 
 
@@ -313,6 +377,24 @@ def usage():
 def die(msg, code=1):
     print("error: " + msg, file=sys.stderr)
     sys.exit(code)
+
+
+def pop_flag(a, name):
+    """Remove a bare flag from argv; True if it was there."""
+    if name in a:
+        a.remove(name)
+        return True
+    return False
+
+
+def pop_opt(a, name):
+    """Remove `--name value` from argv and return the value (or None)."""
+    if name not in a:
+        return None
+    i = a.index(name)
+    val = a[i + 1] if i + 1 < len(a) else None
+    del a[i:i + 2]
+    return val
 
 
 def run(args, timeout=30, check=False):
@@ -1504,9 +1586,434 @@ def cmd_revert(path=None):
     print(t("apply_note"))
 
 
-def cmd_join(ssid, psk=None, open_net=False):
+# --------------------------------------------------------------------------
+# join guard: roll back automatically when a switch leaves the box offline
+#
+# On a headless box Wi-Fi is the only uplink, so a bad `join` is not "wrong
+# network", it is "gone": no ssh, no way in, until someone power-cycles it.
+# The guard is a detached process (own session, so sshd hanging up cannot
+# kill it) that starts before the switch is applied, watches the link, and
+# restores the pre-join config if the box ends up with no uplink at all.
+# --------------------------------------------------------------------------
+
+DEFAULT_GUARD_TIMEOUT = {"android": 120, "nm": 60, "wpa": 45}
+DEFAULT_VERIFY = {"android": 150, "nm": 60, "wpa": 45}
+
+
+def state_dir():
+    for d in (os.environ.get("N2WIFI_STATE_DIR"), "/run", "/var/run",
+              "/data/local/tmp", "/tmp"):
+        if d and os.path.isdir(d) and os.access(d, os.W_OK):
+            return d
+    return "/tmp"
+
+
+def guard_state_path():
+    return os.path.join(state_dir(), "n2wifi-guard.json")
+
+
+def guard_log_path():
+    return os.path.join(state_dir(), "n2wifi-guard.log")
+
+
+def gwrite(path, obj):
+    """Write JSON atomically -- a reader never sees half a file."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def gread(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def link_up():
+    """Carrier state, for when the SSID cannot be read (no iw, no nmcli)."""
+    try:
+        with open("/sys/class/net/%s/operstate" % IFACE) as f:
+            return f.read().strip() in ("up", "unknown")
+    except OSError:
+        return False
+
+
+def ping_ok():
+    """Does the default gateway answer?  Catches 'associated but dead'."""
+    gw = None
+    rc, out, _ = run(["ip", "-4", "route", "show", "default"], timeout=10)
+    if rc == 0:
+        m = re.search(r"default\s+via\s+(\d+\.\d+\.\d+\.\d+)", out)
+        if m:
+            gw = m.group(1)
+    if not gw:
+        rc, out, _ = run(["ip", "-4", "route"], timeout=10)
+        if rc == 0:
+            m = re.search(r"(\d+\.\d+\.\d+\.\d+)\s+dev\s+" + re.escape(IFACE), out)
+            gw = m.group(1) if m else None
+    if not gw or gw.startswith("0.0.0.0"):
+        return False
+    rc, _, _ = run(["ping", "-c", "2", "-W", "2", gw], timeout=10)
+    return rc == 0
+
+
+def link_state(check="ip"):
+    """{ssid, ip, ok, blind} -- `ok` means 'this box still has an uplink'."""
+    info = current_connection()
+    ssid = info.get("ssid") or None
+    ip = info.get("ip") or None
+    if check == "link":
+        ok = bool(ssid) or link_up()
+    elif check == "ping":
+        ok = bool(ip) and ping_ok()
+    else:  # ip
+        ok = bool(ip)
+    return {"ssid": ssid, "ip": ip, "ok": ok, "blind": ssid is None}
+
+
+def active_config_file():
+    b = backend_name()
+    if b == "android":
+        return xml_path()
+    if b == "wpa":
+        return wpa_conf()
+    return None  # nm: one keyfile per network, nothing to snapshot
+
+
+def snapshot_config(tag="prejoin"):
+    """Freeze the live config before a switch, so we can put it back."""
+    p = active_config_file()
+    if not p or not os.path.exists(p):
+        return None
+    dst = "%s.n2snap-%s" % (p, tag)
+    shutil.copy2(p, dst)
+    try:
+        os.chmod(dst, 0o600)
+    except OSError:
+        pass
+    return dst
+
+
+def restore_snapshot(snap):
+    """Put the snapshot back over the live config (android / wpa only)."""
+    if not snap or not os.path.exists(snap):
+        return False
+    b = backend_name()
+    try:
+        with open(snap, "r", encoding="utf-8", errors="replace") as f:
+            body = f.read()
+    except OSError:
+        return False
+    if b == "android":
+        if "<NetworkList>" not in body:
+            return False
+        shutil.copy2(snap, xml_path())
+        try:
+            os.chmod(xml_path(), 0o600)
+            os.chown(xml_path(), UID, GID)
+        except OSError:
+            pass
+        return True
+    if not body.strip():
+        return False
+    target = snap.split(".n2snap-")[0]
+    shutil.copy2(snap, target)
+    try:
+        os.chmod(target, 0o600)
+    except OSError:
+        pass
+    return True
+
+
+def reload_quiet(b):
+    """Re-apply the restored config without the chatter of cmd_apply."""
+    if b == "android":
+        pid = find_pid("system_server")
+        if not pid:
+            return False
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            return False
+        t0 = time.time()
+        while time.time() - t0 < 180:
+            time.sleep(2)
+            p = find_pid("system_server")
+            if p and p != pid:
+                time.sleep(3)
+                return True
+        return False
+    if b == "wpa":
+        if wpa_live():
+            rc, _, _ = wpa_cli(["reconfigure"])
+            if rc == 0:
+                time.sleep(3)
+                return True
+        for svc in ("wpa_supplicant@" + IFACE, "wpa_supplicant", "networking"):
+            rc, _, _ = run(["systemctl", "restart", svc], timeout=90)
+            if rc == 0:
+                time.sleep(3)
+                return True
+        return False
+    run(["nmcli", "connection", "reload"], timeout=30)
+    return True
+
+
+def do_rollback(cfg):
+    """Get back onto the network we were on before the switch. -> (ok, detail)"""
+    b = cfg.get("backend")
+    if b in ("android", "wpa"):
+        if not restore_snapshot(cfg.get("snap")):
+            return False, "no usable pre-join snapshot"
+        if not reload_quiet(b):
+            return False, "config restored but the reload did not complete"
+        return True, "config restored from the pre-join snapshot"
+    # nm: drop the profile we just added, then bring the old one back up
+    if cfg.get("target"):
+        run(["nmcli", "connection", "delete", cfg["target"]], timeout=40)
+    run(["nmcli", "connection", "reload"], timeout=30)
+    old = cfg.get("old")
+    if not old:
+        return False, "no previous profile to activate"
+    rc, out, err = run(["nmcli", "connection", "up", old], timeout=120)
+    if rc != 0:
+        return False, (err or out).strip() or ("nmcli exit %d" % rc)
+    return True, "re-activated %s" % old
+
+
+def guard_run(cfg):
+    """The detached watchdog.  Returns 0 online / 1 gave up."""
+    st = cfg["state"]
+    log = cfg["log"]
+    target = cfg.get("target")
+    old = cfg.get("old")
+    check = cfg.get("check", "ip")
+    strict = bool(cfg.get("strict"))
+    timeout = int(cfg.get("timeout") or 60)
+    marker = cfg.get("marker")
+
+    def note(phase, msg, **kw):
+        rec = {"ts": int(time.time()), "phase": phase, "msg": msg,
+               "target": target, "old": old, "backend": cfg.get("backend"),
+               "check": check, "strict": strict, "pid": os.getpid()}
+        rec.update(kw)
+        try:
+            gwrite(st, rec)
+        except OSError:
+            pass
+        try:
+            with open(log, "a", encoding="utf-8") as f:
+                f.write("[%s] %-10s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"),
+                                             phase, msg))
+        except OSError:
+            pass
+
+    note("armed", "armed: target=%s old=%s check=%s timeout=%ds"
+                  % (target, old or "-", check, timeout))
+
+    # Wait for the parent to say "apply finished" so the timeout is measured
+    # from the switch, not from process start.  If the parent was killed
+    # (the ssh session died mid-switch) start counting after a grace period.
+    grace = int(cfg.get("grace") or 200)
+    t0 = time.time()
+    while marker and not os.path.exists(marker):
+        if time.time() - t0 > grace:
+            note("armed", "parent never signalled the applied switch; "
+                          "carrying on anyway")
+            break
+        time.sleep(1)
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        s = link_state(check)
+        if s["ssid"] == target and s["ok"]:
+            note("ok", "connected to %s (%s)" % (target, s["ip"] or "-"))
+            return 0
+        time.sleep(3)
+    s = link_state(check)
+
+    if s["ssid"] == target and s["ok"]:
+        note("ok", "connected to %s (%s)" % (target, s["ip"] or "-"))
+        return 0
+
+    # Still online, just not on the target: that is a successful outcome for
+    # a headless box.  Only --strict treats it as a failure worth undoing.
+    if not strict and s["ok"]:
+        # ...but `apply` flipped autoconnect on for the new profile; put it
+        # back so a later boot cannot fight with the network that works.
+        if cfg.get("backend") == "nm" and target and s["ssid"] != target:
+            run(["nmcli", "connection", "modify", target,
+                 "connection.autoconnect", "no"], timeout=30)
+        note("ok", "still online via %s -- not the target, left alone"
+                   % (s["ssid"] or "ip " + (s["ip"] or "?")), ssid=s["ssid"])
+        return 0
+
+    if not old:
+        note("failed", "switch failed and there is no previous connection to "
+                       "fall back to (first setup?) -- nothing was rolled back")
+        return 1
+
+    if strict and s["ok"]:
+        why = ("still on %s after %ds, not the target (--strict)"
+               % (s["ssid"] or s["ip"] or "?", timeout))
+    else:
+        why = ("no uplink after %ds (ssid=%s ip=%s)"
+               % (timeout, s["ssid"] or "-", s["ip"] or "-"))
+    note("rollback", "%s; rolling back to %s" % (why, old))
+    okr, detail = do_rollback(cfg)
+    if not okr:
+        note("failed", "rollback failed: %s" % detail)
+        return 1
+
+    verify = int(cfg.get("verify") or 90)
+    t1 = time.time()
+    while time.time() - t1 < verify:
+        s = link_state("link")
+        if s["ssid"] == old:
+            ip = link_state(check)["ip"]
+            note("rolledback", "%s; back on %s (%s)" % (detail, old, ip or "-"),
+                 ssid=old, ip=ip)
+            return 0
+        time.sleep(3)
+    note("failed", "%s, but %s did not come back within %ds"
+                   % (detail, old, verify))
+    return 1
+
+
+def follow_guard(proc, timeout, verify):
+    """Print the guard's progress while it is still running."""
+    st = guard_state_path()
+    seen = None
+    end = time.time() + timeout + verify + 90
+    while time.time() < end:
+        rec = gread(st)
+        if rec:
+            ph = rec.get("phase")
+            if ph != seen:
+                seen = ph
+                if ph not in ("ok", "rolledback", "failed"):
+                    print(t("guard_phase", phase=ph, msg=rec.get("msg", "")))
+        if rec and rec.get("phase") in ("ok", "rolledback", "failed"):
+            break
+        if proc is not None and proc.poll() is not None:
+            rec = rec or gread(st)
+            if rec and rec.get("phase") in ("ok", "rolledback", "failed"):
+                break
+            if rec is None:
+                break
+        time.sleep(2)
+
+    rec = gread(st) or {}
+    ph = rec.get("phase")
+    msg = rec.get("msg", "")
+    if ph == "ok":
+        print(t("guard_ok", msg=msg))
+    elif ph == "rolledback":
+        print(t("guard_rolledback", msg=msg))
+        print(t("guard_retry"))
+    elif ph == "failed":
+        print(t("guard_failed", msg=msg))
+    else:
+        print(t("guard_pending", p=guard_log_path()))
+    return ph
+
+
+def spawn_guard(cfg):
+    cfgfile = os.path.join(state_dir(), "n2wifi-guard.cfg")
+    gwrite(cfgfile, cfg)
+    logp = cfg["log"]
+    try:
+        logf = open(logp, "a", encoding="utf-8")
+    except OSError:
+        logf = None
+    try:
+        return subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "_guard", cfgfile],
+            stdin=subprocess.DEVNULL,
+            stdout=logf or subprocess.DEVNULL,
+            stderr=logf or subprocess.DEVNULL,
+            start_new_session=True,   # survives the ssh hangup
+            close_fds=True)
+    except OSError:
+        return None
+    finally:
+        if logf:
+            logf.close()
+
+
+def cmd_guard():
+    rec = gread(guard_state_path())
+    if not rec:
+        print(t("guard_none"))
+        return
+    print(t("guard_last", ts=time.strftime("%Y-%m-%d %H:%M:%S",
+                                           time.localtime(rec.get("ts", 0)))))
+    print("  phase  : %s" % rec.get("phase"))
+    print("  target : %s" % rec.get("target"))
+    print("  old    : %s" % (rec.get("old") or "-"))
+    print("  msg    : %s" % rec.get("msg", ""))
+    print(t("guard_log_hint", p=guard_log_path()))
+
+
+def cmd_join(ssid, psk=None, open_net=False, timeout=None, check="ip",
+             strict=False, guard=True):
+    b = backend_name()
+    if not b:
+        die(t("be_none"))
+
+    before = link_state("link")
+    old_ssid = before.get("ssid")
+    timeout = int(timeout or DEFAULT_GUARD_TIMEOUT.get(b, 60))
+    verify = DEFAULT_VERIFY.get(b, 60)
+
+    # snapshot before the write, so "roll back" means "exactly as it was"
+    snap = snapshot_config("prejoin") if b in ("android", "wpa") else None
+
     cmd_add(ssid, psk, open_net, remind=False)
-    cmd_apply(ssid)
+
+    if not guard:
+        print(t("guard_off"))
+        cmd_apply(ssid)
+        return
+
+    marker = guard_state_path() + ".applied"
+    try:
+        os.unlink(marker)
+    except OSError:
+        pass
+    cfg = {"backend": b, "target": ssid, "old": old_ssid, "snap": snap,
+           "timeout": timeout, "check": check, "strict": bool(strict),
+           "marker": marker, "state": guard_state_path(),
+           "log": guard_log_path(), "verify": verify,
+           "grace": 240 if b == "android" else 60}
+    proc = spawn_guard(cfg)
+    if proc is None:
+        print(t("guard_spawn_fail"))
+        cmd_apply(ssid)
+        return
+
+    print(t("guard_armed", pid=proc.pid, old=old_ssid or t("not_connected")))
+    print(t("guard_armed2", to=timeout, check=check))
+
+    cmd_apply(ssid)          # <-- on a Wi-Fi uplink this may drop our ssh
+
+    try:
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write(str(int(time.time())))
+    except OSError:
+        pass
+
+    ph = follow_guard(proc, timeout, verify)
+    if ph in ("ok", "rolledback"):
+        print("")
+        cmd_status()
+    elif ph is None or ph == "armed":
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -1536,6 +2043,13 @@ def main():
         show_backend()
         return
 
+    # internal: the detached watchdog re-invokes us as `_guard <cfgfile>`
+    if a[0] == "_guard":
+        cfg = gread(a[1]) if len(a) > 1 else None
+        if not cfg:
+            die("guard: no usable config")
+        sys.exit(guard_run(cfg))
+
     if os.geteuid() != 0:
         die(t("not_root"))
 
@@ -1549,20 +2063,37 @@ def main():
     elif cmd == "scan":
         cmd_scan("--all" in a)
     elif cmd in ("add", "join"):
-        if len(a) < 2:
+        timeout = pop_opt(a, "--timeout")
+        if timeout is not None:
+            try:
+                timeout = int(timeout)
+            except ValueError:
+                die(t("bad_timeout"))
+            if timeout <= 0:
+                die(t("bad_timeout"))
+        check = pop_opt(a, "--check") or "ip"
+        if check not in ("link", "ip", "ping"):
+            die(t("bad_check"))
+        strict = pop_flag(a, "--strict")
+        no_guard = pop_flag(a, "--no-guard")
+        open_net = pop_flag(a, "--open")
+        rest = a[1:]
+        if not rest:
             die(t("usage_add") if cmd == "add" else t("usage_join"))
-        open_net = "--open" in a
-        psk = None if open_net else (a[2] if len(a) > 2 else None)
+        psk = None if open_net else (rest[1] if len(rest) > 1 else None)
         if cmd == "add":
-            cmd_add(a[1], psk, open_net)
+            cmd_add(rest[0], psk, open_net)
         else:
-            cmd_join(a[1], psk, open_net)
+            cmd_join(rest[0], psk, open_net, timeout=timeout, check=check,
+                     strict=strict, guard=not no_guard)
     elif cmd == "del":
         if len(a) < 2:
             die(t("usage_del"))
         cmd_del(a[1])
     elif cmd == "apply":
         cmd_apply()
+    elif cmd == "guard":
+        cmd_guard()
     elif cmd == "backups":
         cmd_backups()
     elif cmd == "revert":
