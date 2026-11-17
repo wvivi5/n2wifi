@@ -243,6 +243,22 @@ n2wifi join "SiteB-5G" "password"
 
 退出码：`0` 成功，`1` 出错，`2` 未连接（`ip`）。
 
+## 把一台机器的 WiFi 复制到其它机器
+
+`sync_wifi.sh` 不是 n2wifi 的子命令，是个配套脚本：从一台已经配好网的机器（通常是网关）读出所有无线档案的
+SSID / 密码 / 优先级，再逐台下发到别的机器。
+
+```sh
+sh sync_wifi.sh                 # 默认目标是一组常见主机，离线的自动跳过
+sh sync_wifi.sh max1 n04        # 只同步指定主机（ssh 别名或 IP）
+sh sync_wifi.sh --from max1     # 换源机，默认 rn4x
+```
+
+- 幂等：已有档案用 `nmcli connection modify` 改密码和优先级，没有的才 `add`，反复跑没副作用。
+- **只改档案，不 `up`** —— 不会切断目标机当前的 ssh；`autoconnect=yes` 开着，下次掉线自动按优先级挑网。
+- 优先级沿用源机的值：通常 5G 给 100、2.4G 给 10，效果就是"5G 优先、2.4G 兜底"。
+- 目标机需要 NetworkManager（`nmcli`）。Android / wpa 后端的机器改用 `n2wifi add` 逐条加。
+
 ## 切坏了就失联？`join` 会自己回滚
 
 无头机器的 WiFi 就是唯一的上联。所以一次失败的 `join` 不是"连错了网络"，

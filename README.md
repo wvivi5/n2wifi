@@ -260,6 +260,24 @@ nothing is injected at boot.
 
 Exit codes: `0` ok, `1` error, `2` not connected (`ip`).
 
+## Copy one box's Wi-Fi to the rest of them
+
+`sync_wifi.sh` is not an n2wifi subcommand but a companion script: it reads every wireless profile
+(SSID / password / priority) off one machine that is already on the network — usually the gateway —
+and pushes them to the others.
+
+```sh
+sh sync_wifi.sh                 # default host list, offline machines are skipped
+sh sync_wifi.sh max1 n04        # only these hosts (ssh aliases or IPs)
+sh sync_wifi.sh --from max1     # use a different source box, default rn4x
+```
+
+- Idempotent: existing profiles get `nmcli connection modify` (password + priority), missing ones get `add`.
+- **It never brings a profile up**, so the target's current ssh session is untouched. With `autoconnect=yes`
+  the machine picks the best network by priority the next time it loses one.
+- Priorities are copied as-is: 5G usually 100, 2.4G 10 — i.e. "5G preferred, 2.4G as the safety net".
+- Targets need NetworkManager (`nmcli`). Android / wpa backends should use `n2wifi add` per network instead.
+
 ## A bad switch cannot strand the box: `join` rolls back
 
 On a headless box Wi-Fi *is* the uplink. A failed `join` is therefore not "wrong network",
