@@ -41,7 +41,7 @@ The usual tool for this is `wpa_cli`, but on several vendor ROMs (MIUI in partic
 
 On a normal Linux box the same commands drive whatever is actually in charge —
 `nmcli` when NetworkManager owns the radio, `wpa_cli`/`wpa_supplicant.conf` when it does not.
-You get one set of commands (`scan` / `list` / `add` / `join` / `del` / `revert`) instead of
+You get one set of commands (`scan` / `list` / `add` / `join` / `switch` / `del` / `revert`) instead of
 remembering three different toolchains.
 
 ## Backends
@@ -59,7 +59,8 @@ what was picked and why. Override with `N2WIFI_BACKEND=android|nm|wpa`.
 
 - `scan` — nearby APs with signal, band, channel and security, `[connected]` / `[saved]` tags
 - `list` / `status` / `ip` — what is saved, what is connected, and a script-friendly IP
-- `add` / `join` / `del` — add a network, add and switch to it now, or remove one
+- `add` / `join` / `switch` / `del` — add a network, add and switch now, switch to an
+  already-saved one (no password), or remove one
 - `backend` — which backend was detected, which config file it uses, which interface
 - **Safe writes** — atomic replace, self-check before commit, automatic timestamped
   backup for every write, and `revert`
@@ -248,6 +249,12 @@ Switching right now, in one step:
 n2wifi join "SiteB-5G" "password"
 ```
 
+If that network is **already saved**, skip the password and just switch to it:
+
+```sh
+n2wifi switch "SiteB-5G"
+```
+
 After a reboot the machine reconnects on its own — the config is the platform's own store,
 nothing is injected at boot.
 
@@ -264,6 +271,7 @@ nothing is injected at boot.
 | `n2wifi add <SSID> <pass>` | Write the network to the store (takes effect on the next reload/reboot) |
 | `n2wifi add <SSID> --open` | Add an open network |
 | `n2wifi join <SSID> <pass>` | `add` + `apply`, with automatic self-rescue (next section) |
+| `n2wifi switch <SSID>` | Activate an **already-saved** profile; no password needed, same self-rescue |
 | `n2wifi del <SSID>` | Remove a saved network (needs `apply` to take effect) |
 | `n2wifi apply` | Make the backend reload its config (see the backend table for the cost) |
 | `n2wifi guard` | What the last `join` guard decided, and why |

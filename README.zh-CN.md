@@ -38,7 +38,7 @@ $ n2wifi scan
 
 在普通 Linux 上，同一套命令驱动系统里真正干活的组件：NetworkManager 管着网卡就用 `nmcli`，
 否则就退到 `wpa_cli` / `wpa_supplicant.conf`。你不用再记三套工具链，
-`scan` / `list` / `add` / `join` / `del` / `revert` 一套到底。
+`scan` / `list` / `add` / `join` / `switch` / `del` / `revert` 一套到底。
 
 ## 三种后端
 
@@ -55,7 +55,7 @@ $ n2wifi scan
 
 - `scan` —— 扫周边 AP：信号 / 频段 / 信道 / 加密，并标出 `[当前]` / `[已保存]`
 - `list` / `status` / `ip` —— 存了哪些、现在连哪个、给脚本用的纯 IP 输出
-- `add` / `join` / `del` —— 只写入 / 写入并立即切换 / 删除
+- `add` / `join` / `switch` / `del` —— 只写入 / 写入并立即切换 / 切到已保存的（免密码） / 删除
 - `backend` —— 显示检测到哪个后端、用哪个配置文件、哪块网卡
 - **安全写入** —— 原子替换 + 提交前自检 + 每次写入都自动备份 + `revert` 回滚
 - **切坏了不会失联** —— `join` 前先放一个脱离会话的守卫，切完没网就按三级阶梯自救：
@@ -231,6 +231,12 @@ n2wifi apply                     # 让后端用它
 n2wifi join "SiteB-5G" "password"
 ```
 
+如果这个网络**之前已经 `add` 过**，就不用再敲密码，直接切：
+
+```sh
+n2wifi switch "SiteB-5G"
+```
+
 重启之后机器会自己连回来 —— 因为写的是系统自己的配置存储，开机不需要任何注入。
 
 ## 命令
@@ -246,6 +252,7 @@ n2wifi join "SiteB-5G" "password"
 | `n2wifi add <SSID> <密码>` | 写入配置（下次重载/重启生效），会做密码长度校验 |
 | `n2wifi add <SSID> --open` | 加一个开放网络 |
 | `n2wifi join <SSID> <密码>` | `add` + `apply`，切坏了自动自救（见下节） |
+| `n2wifi switch <SSID>` | 切到**已保存**的网络，不用再输密码；同一套自救/回滚 |
 | `n2wifi del <SSID>` | 删除某个已保存网络（需要 `apply` 才生效） |
 | `n2wifi apply` | 让后端重新加载配置（代价见上面的后端表） |
 | `n2wifi guard` | 上一次 `join` 的守卫判了什么、为什么 |
