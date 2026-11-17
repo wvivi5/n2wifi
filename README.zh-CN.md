@@ -106,7 +106,19 @@ curl -fsSL https://codeload.github.com/wvivi5/n2wifi/tar.gz/refs/heads/main \
 
 `n2wifi` 只有一个文件，但**不建议**用 `raw.githubusercontent.com` 那行 curl ——
 这个域名在国内经常被 RST（`curl: (35) Recv failure: Connection reset by peer`），
-而且它只解析出 IPv6 的时候更会直接失败。用下面两条中的任意一条：
+而且它只解析出 IPv6 的时候更会直接失败。用下面几条中的任意一条：
+
+**0a. 下 release 里的包（不依赖 git，也不碰 raw 域名）**
+
+[Releases](https://github.com/wvivi5/n2wifi/releases/latest) 上有整包和单文件，
+最省事的是整包，解压就能装：
+
+```sh
+curl -fL https://github.com/wvivi5/n2wifi/releases/latest/download/n2wifi-2.1.2.tar.gz | tar xz
+cd n2wifi-2.1.2 && ./install.sh
+```
+
+只要工具本身、连 `install.sh` 都不想跑的话，就下那个单独的 `n2wifi` 文件丢进 `PATH` 即可。
 
 **A. 有 `git`（推荐，一次 clone 之后还能 `git pull` 升级）**
 

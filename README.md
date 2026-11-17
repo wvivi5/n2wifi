@@ -117,6 +117,19 @@ one-liner -- that host is frequently reset (or resolves to IPv6 only) on
 mainland networks, which shows up as `curl: (35) Recv failure: Connection
 reset by peer`. Use one of these instead:
 
+**0a. Grab the release tarball (no `git`, no `raw.` host)**
+
+The [releases](https://github.com/wvivi5/n2wifi/releases/latest) carry a full package and the
+single-file tool separately. The package is the easiest path:
+
+```sh
+curl -fL https://github.com/wvivi5/n2wifi/releases/latest/download/n2wifi-2.1.2.tar.gz | tar xz
+cd n2wifi-2.1.2 && ./install.sh
+```
+
+If you only want the tool itself and would rather not run `install.sh` at all, download the
+standalone `n2wifi` asset and drop it into your `PATH`.
+
 **A. With `git` (recommended -- `git pull` upgrades later)**
 
 ```sh
